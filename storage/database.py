@@ -24,7 +24,7 @@ class GroupMemoryDatabase:
     changing the current identity model.
     """
 
-    SCHEMA_VERSION = 6
+    SCHEMA_VERSION = 7
     BUSY_TIMEOUT_MS = 1_000
     WRITE_RETRY_ATTEMPTS = 3
     WRITE_RETRY_DELAY_SECONDS = 0.05
@@ -48,6 +48,36 @@ class GroupMemoryDatabase:
     MAX_MEMBER_OVERVIEW_CANDIDATES = 2_000
     MAX_MEMBER_METADATA_ITEMS = 100
     MAX_MEMORY_PREVIEW_CHARS = 1_024
+    BEHAVIOR_PROFILE_WINDOW_SECONDS = 90 * 24 * 60 * 60
+    BEHAVIOR_PROFILE_MAX_MESSAGE_SAMPLES = 500
+    BEHAVIOR_PROFILE_MIN_MESSAGES = 12
+    BEHAVIOR_PROFILE_MIN_ACTIVE_DAYS = 3
+    BEHAVIOR_PROFILE_HIGH_FREQUENCY_MESSAGES = 30
+    BEHAVIOR_PROFILE_HIGH_FREQUENCY_ACTIVE_DAYS = 7
+    BEHAVIOR_PROFILE_QUESTION_MINIMUM = 5
+    BEHAVIOR_PROFILE_CONTENT_FEATURE_MINIMUM = 5
+    BEHAVIOR_PROFILE_INCREMENTAL_MESSAGES = 6
+    BEHAVIOR_PROFILE_COOLDOWN_SECONDS = 6 * 60 * 60
+    BEHAVIOR_PROFILE_LAZY_REFRESH_SECONDS = 24 * 60 * 60
+    BEHAVIOR_PROFILE_RULE_VERSION = 1
+    AUTO_BEHAVIOR_TAGS = {
+        "持续互动",
+        "高频互动",
+        "爱提问",
+        "常发图片",
+        "常发表情包",
+    }
+    _QUESTION_PATTERN = re.compile(
+        r"[?？]|(?:怎么|如何|为什么|为何|是否|能否|可不可以|能不能|吗|么)"
+    )
+    _IMAGE_MARKER_PATTERN = re.compile(
+        r"\[(?:图片|图像|image|img)\]|\[CQ:image(?:,|\])|<image",
+        re.IGNORECASE,
+    )
+    _EMOJI_MARKER_PATTERN = re.compile(
+        r"\[(?:表情|动画表情|emoji|emoticon)\]|\[CQ:(?:face|mface)(?:,|\])|<emoji",
+        re.IGNORECASE,
+    )
     ALIAS_TYPES = {"nickname", "group_note", "manual", "historical", "mention"}
     TAG_LAYERS = {"confirmed", "observed", "reported", "manual"}
     EVENT_TYPES = {
@@ -250,8 +280,9 @@ class GroupMemoryDatabase:
         platform_id: str,
         external_group_id: str,
         external_user_id: str,
+        include_behavior_profile: bool = False,
     ) -> dict[str, object] | None:
-        """Return the minimal non-AI profile data for one group member."""
+        """Return one member overview, with optional WebUI-only internal profile."""
         return self._run_with_retry(
             lambda connection: self._get_profile_overview(
                 connection,
@@ -262,6 +293,7 @@ class GroupMemoryDatabase:
                 external_user_id=self._require_identifier(
                     "external_user_id", external_user_id
                 ),
+                include_behavior_profile=bool(include_behavior_profile),
             )
         )
 
@@ -742,12 +774,13 @@ class GroupMemoryDatabase:
         self._ensure_version_4_schema(connection)
         self._ensure_version_5_schema(connection)
         self._ensure_version_6_schema(connection)
+        self._ensure_version_7_schema(connection)
         self._backfill_profiles(connection)
         self._backfill_members(connection)
         self._backfill_version_5_schema(
             connection,
             reconstruct_member_status=(
-                schema_version < self.SCHEMA_VERSION or member_status_missing
+                schema_version < 5 or member_status_missing
             ),
         )
         self._validate_version_2_schema(connection)
@@ -755,6 +788,7 @@ class GroupMemoryDatabase:
         self._validate_version_4_schema(connection)
         self._validate_version_5_schema(connection)
         self._validate_version_6_schema(connection)
+        self._validate_version_7_schema(connection)
 
         if schema_version < self.SCHEMA_VERSION:
             self._set_schema_version(connection, self.SCHEMA_VERSION)
@@ -864,6 +898,10 @@ class GroupMemoryDatabase:
                 content=content,
                 event_timestamp=message_timestamp,
             )
+        self._record_member_behavior_activity(
+            connection,
+            member_id=canonical_member_id,
+        )
         return cursor.rowcount == 1
 
     @staticmethod
@@ -1116,6 +1154,7 @@ class GroupMemoryDatabase:
         platform_id: str,
         external_group_id: str,
         external_user_id: str,
+        include_behavior_profile: bool,
     ) -> dict[str, object] | None:
         try:
             group_id, _, member_id = self._member_context(
@@ -1127,6 +1166,10 @@ class GroupMemoryDatabase:
         except ValueError:
             return None
         canonical_identity = self._member_public_identity(connection, member_id)
+        if include_behavior_profile:
+            self._refresh_behavior_profile_if_stale(
+                connection, member_id=member_id
+            )
         external_user_id = str(canonical_identity["user_id"])
         row = connection.execute(
             """
@@ -1161,7 +1204,7 @@ class GroupMemoryDatabase:
         message_count, last_message_timestamp = self._member_message_stats(
             connection, group_id=group_id, canonical_member_id=member_id
         )
-        return {
+        result: dict[str, object] = {
             "member_id": member_id,
             "platform_id": str(row[0]),
             "platform_name": row[1] or "",
@@ -1213,6 +1256,311 @@ class GroupMemoryDatabase:
                 limit=self.DEFAULT_RELATION_AGGREGATE_LIMIT,
                 event_types=[],
                 source_types=[],
+            ),
+        }
+        if include_behavior_profile:
+            result["behavior_profile"] = self._behavior_profile_payload(
+                connection, member_id=member_id
+            )
+        return result
+
+    def _record_member_behavior_activity(
+        self, connection: sqlite3.Connection, *, member_id: int
+    ) -> None:
+        """Queue a bounded rules refresh without rescanning on every message."""
+        member_id = self._canonical_member_id(connection, member_id)
+        connection.execute(
+            """
+            INSERT INTO "member_behavior_profiles" (
+                member_id, pending_message_count, rule_version
+            ) VALUES (?, 1, ?)
+            ON CONFLICT(member_id) DO UPDATE SET
+                pending_message_count = "member_behavior_profiles".pending_message_count + 1,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (member_id, self.BEHAVIOR_PROFILE_RULE_VERSION),
+        )
+        row = connection.execute(
+            """
+            SELECT pending_message_count, last_analyzed_at
+            FROM "member_behavior_profiles"
+            WHERE member_id = ?
+            """,
+            (member_id,),
+        ).fetchone()
+        if row is None:
+            return
+        pending_message_count, last_analyzed_at = int(row[0]), int(row[1])
+        minimum_pending = (
+            self.BEHAVIOR_PROFILE_MIN_MESSAGES
+            if last_analyzed_at <= 0
+            else self.BEHAVIOR_PROFILE_INCREMENTAL_MESSAGES
+        )
+        now_seconds = int(time.time())
+        if pending_message_count < minimum_pending:
+            return
+        if (
+            last_analyzed_at > 0
+            and now_seconds - last_analyzed_at < self.BEHAVIOR_PROFILE_COOLDOWN_SECONDS
+        ):
+            return
+        self._refresh_member_behavior_profile(
+            connection, member_id=member_id, now_seconds=now_seconds
+        )
+
+    def _refresh_behavior_profile_if_stale(
+        self, connection: sqlite3.Connection, *, member_id: int
+    ) -> None:
+        """Lazily materialise old history when an administrator opens WebUI."""
+        member_id = self._canonical_member_id(connection, member_id)
+        row = connection.execute(
+            """
+            SELECT last_analyzed_at FROM "member_behavior_profiles"
+            WHERE member_id = ?
+            """,
+            (member_id,),
+        ).fetchone()
+        now_seconds = int(time.time())
+        last_analyzed_at = int(row[0]) if row is not None else 0
+        if (
+            last_analyzed_at <= 0
+            or now_seconds - last_analyzed_at
+            >= self.BEHAVIOR_PROFILE_LAZY_REFRESH_SECONDS
+        ):
+            self._refresh_member_behavior_profile(
+                connection, member_id=member_id, now_seconds=now_seconds
+            )
+
+    def _refresh_member_behavior_profile(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        member_id: int,
+        now_seconds: int,
+    ) -> None:
+        """Rebuild one compact group-scoped profile from a bounded message window."""
+        member_id = self._canonical_member_id(connection, member_id)
+        group_id = self._member_group_id(connection, member_id)
+        descendant_member_ids = self._member_descendant_ids(connection, member_id)
+        placeholders = ", ".join("?" for _ in descendant_member_ids)
+        cutoff_timestamp = now_seconds - self.BEHAVIOR_PROFILE_WINDOW_SECONDS
+        statistics = connection.execute(
+            """
+            SELECT
+                COUNT(msg.id),
+                COUNT(DISTINCT strftime('%Y-%m-%d', msg.message_timestamp, 'unixepoch'))
+            FROM "messages" AS msg
+            JOIN "members" AS member
+              ON member.group_id = msg.group_id AND member.user_id = msg.user_id
+            WHERE msg.group_id = ?
+              AND member.id IN (""" + placeholders + """)
+              AND msg.message_timestamp >= ?
+            """,
+            (group_id, *descendant_member_ids, cutoff_timestamp),
+        ).fetchone()
+        message_count = int(statistics[0] or 0)
+        active_day_count = int(statistics[1] or 0)
+
+        question_count = 0
+        image_count = 0
+        emoji_count = 0
+        sampled_message_count = 0
+        message_rows = connection.execute(
+            """
+            SELECT msg.content
+            FROM "messages" AS msg
+            JOIN "members" AS member
+              ON member.group_id = msg.group_id AND member.user_id = msg.user_id
+            WHERE msg.group_id = ?
+              AND member.id IN (""" + placeholders + """)
+              AND msg.message_timestamp >= ?
+            ORDER BY msg.message_timestamp DESC, msg.id DESC
+            LIMIT ?
+            """,
+            (
+                group_id,
+                *descendant_member_ids,
+                cutoff_timestamp,
+                self.BEHAVIOR_PROFILE_MAX_MESSAGE_SAMPLES,
+            ),
+        )
+        for row in message_rows:
+            content = str(row[0] or "")
+            sampled_message_count += 1
+            if self._QUESTION_PATTERN.search(content):
+                question_count += 1
+            if self._IMAGE_MARKER_PATTERN.search(content):
+                image_count += 1
+            if self._EMOJI_MARKER_PATTERN.search(content):
+                emoji_count += 1
+
+        auto_tags: list[tuple[str, float]] = []
+        if message_count >= self.BEHAVIOR_PROFILE_MIN_MESSAGES:
+            if active_day_count >= self.BEHAVIOR_PROFILE_MIN_ACTIVE_DAYS:
+                auto_tags.append(("持续互动", 0.65))
+            if (
+                message_count >= self.BEHAVIOR_PROFILE_HIGH_FREQUENCY_MESSAGES
+                and active_day_count
+                >= self.BEHAVIOR_PROFILE_HIGH_FREQUENCY_ACTIVE_DAYS
+            ):
+                auto_tags.append(("高频互动", 0.85))
+            sample_ratio_denominator = max(sampled_message_count, 1)
+            if (
+                question_count >= self.BEHAVIOR_PROFILE_QUESTION_MINIMUM
+                and question_count / sample_ratio_denominator >= 0.20
+            ):
+                auto_tags.append(("爱提问", 0.75))
+            if image_count >= self.BEHAVIOR_PROFILE_CONTENT_FEATURE_MINIMUM:
+                auto_tags.append(("常发图片", 0.75))
+            if emoji_count >= self.BEHAVIOR_PROFILE_CONTENT_FEATURE_MINIMUM:
+                auto_tags.append(("常发表情包", 0.75))
+
+        tag_names = {tag_name for tag_name, _ in auto_tags}
+        if message_count < self.BEHAVIOR_PROFILE_MIN_MESSAGES:
+            summary = ""
+        elif not tag_names:
+            summary = (
+                f"近 90 天已记录 {message_count} 条群消息，"
+                "暂未形成稳定互动特征。"
+            )
+        else:
+            summary_parts: list[str] = []
+            if "高频互动" in tag_names:
+                summary_parts.append("互动较活跃")
+            elif "持续互动" in tag_names:
+                summary_parts.append("持续参与群聊")
+            if "爱提问" in tag_names:
+                summary_parts.append("偏提问型")
+            if "常发图片" in tag_names:
+                summary_parts.append("常分享图片")
+            if "常发表情包" in tag_names:
+                summary_parts.append("常发表情包")
+            summary = "近 90 天" + "，".join(summary_parts[:3]) + "。"
+
+        connection.execute(
+            """
+            INSERT INTO "member_behavior_profiles" (
+                member_id, summary, window_start_timestamp, window_end_timestamp,
+                message_count, active_day_count, pending_message_count,
+                last_analyzed_at, rule_version
+            ) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?)
+            ON CONFLICT(member_id) DO UPDATE SET
+                summary = excluded.summary,
+                window_start_timestamp = excluded.window_start_timestamp,
+                window_end_timestamp = excluded.window_end_timestamp,
+                message_count = excluded.message_count,
+                active_day_count = excluded.active_day_count,
+                pending_message_count = 0,
+                last_analyzed_at = excluded.last_analyzed_at,
+                rule_version = excluded.rule_version,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (
+                member_id,
+                summary,
+                cutoff_timestamp,
+                now_seconds,
+                message_count,
+                active_day_count,
+                now_seconds,
+                self.BEHAVIOR_PROFILE_RULE_VERSION,
+            ),
+        )
+        self._replace_auto_behavior_tags(
+            connection, member_id=member_id, auto_tags=auto_tags
+        )
+
+    def _replace_auto_behavior_tags(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        member_id: int,
+        auto_tags: list[tuple[str, float]],
+    ) -> None:
+        """Replace only controlled rule tags; manual tags are never touched."""
+        placeholders = ", ".join("?" for _ in self.AUTO_BEHAVIOR_TAGS)
+        connection.execute(
+            """
+            DELETE FROM "member_tags"
+            WHERE member_id = ?
+              AND layer = 'observed'
+              AND source_type = 'observed'
+              AND tag_definition_id IN (
+                  SELECT id FROM "tag_definitions"
+                  WHERE name IN (""" + placeholders + """)
+              )
+            """,
+            (member_id, *sorted(self.AUTO_BEHAVIOR_TAGS)),
+        )
+        for tag_name, confidence in auto_tags:
+            self._insert_or_update_layered_tag(
+                connection,
+                member_id=member_id,
+                tag_name=tag_name,
+                layer="observed",
+                confidence=confidence,
+                source_type="observed",
+            )
+
+    def _behavior_profile_payload(
+        self, connection: sqlite3.Connection, *, member_id: int
+    ) -> dict[str, object]:
+        """Return a small WebUI-only payload without exposing raw chat text."""
+        member_id = self._canonical_member_id(connection, member_id)
+        row = connection.execute(
+            """
+            SELECT summary, window_start_timestamp, window_end_timestamp,
+                   message_count, active_day_count, last_analyzed_at, rule_version
+            FROM "member_behavior_profiles"
+            WHERE member_id = ?
+            """,
+            (member_id,),
+        ).fetchone()
+        placeholders = ", ".join("?" for _ in self.AUTO_BEHAVIOR_TAGS)
+        tag_rows = connection.execute(
+            """
+            SELECT td.name, mt.confidence
+            FROM "member_tags" AS mt
+            JOIN "tag_definitions" AS td ON td.id = mt.tag_definition_id
+            WHERE mt.member_id = ?
+              AND mt.layer = 'observed'
+              AND mt.source_type = 'observed'
+              AND td.name IN (""" + placeholders + """)
+            ORDER BY td.name COLLATE NOCASE
+            """,
+            (member_id, *sorted(self.AUTO_BEHAVIOR_TAGS)),
+        ).fetchall()
+        if row is None:
+            return {
+                "summary": "消息样本不足，继续记录后会生成内部画像。",
+                "auto_tags": [],
+                "window_start_timestamp": 0,
+                "window_end_timestamp": 0,
+                "message_count": 0,
+                "active_day_count": 0,
+                "last_analyzed_at": 0,
+                "rule_version": self.BEHAVIOR_PROFILE_RULE_VERSION,
+                "state": "collecting",
+            }
+        message_count = int(row[3] or 0)
+        return {
+            "summary": str(row[0] or "") or (
+                "消息样本不足，继续记录后会生成内部画像。"
+            ),
+            "auto_tags": [
+                {"name": str(tag_row[0]), "confidence": float(tag_row[1])}
+                for tag_row in tag_rows
+            ],
+            "window_start_timestamp": int(row[1] or 0),
+            "window_end_timestamp": int(row[2] or 0),
+            "message_count": message_count,
+            "active_day_count": int(row[4] or 0),
+            "last_analyzed_at": int(row[5] or 0),
+            "rule_version": int(row[6] or self.BEHAVIOR_PROFILE_RULE_VERSION),
+            "state": (
+                "ready"
+                if message_count >= self.BEHAVIOR_PROFILE_MIN_MESSAGES
+                else "collecting"
             ),
         }
 
@@ -1822,6 +2170,21 @@ class GroupMemoryDatabase:
             ) VALUES (?, ?, ?, 'manual')
             """,
             (source_member_id, target_member_id, reason),
+        )
+        # This data is derived from group messages, unlike manual notes and
+        # tags. Rebuild the target immediately so merged history becomes one
+        # internal profile without carrying a stale source snapshot forward.
+        self._replace_auto_behavior_tags(
+            connection, member_id=source_member_id, auto_tags=[]
+        )
+        connection.execute(
+            'DELETE FROM "member_behavior_profiles" WHERE member_id = ?',
+            (source_member_id,),
+        )
+        self._refresh_member_behavior_profile(
+            connection,
+            member_id=target_member_id,
+            now_seconds=int(time.time()),
         )
 
     def _list_layered_tags_for_identity(
@@ -3323,6 +3686,45 @@ class GroupMemoryDatabase:
             """
         )
 
+    @staticmethod
+    def _ensure_version_7_schema(connection: sqlite3.Connection) -> None:
+        """Create compact group-scoped internal behaviour profile storage."""
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS "member_behavior_profiles" (
+                member_id INTEGER PRIMARY KEY REFERENCES "members"(id),
+                summary TEXT NOT NULL DEFAULT '',
+                window_start_timestamp INTEGER NOT NULL DEFAULT 0,
+                window_end_timestamp INTEGER NOT NULL DEFAULT 0,
+                message_count INTEGER NOT NULL DEFAULT 0,
+                active_day_count INTEGER NOT NULL DEFAULT 0,
+                pending_message_count INTEGER NOT NULL DEFAULT 0,
+                last_analyzed_at INTEGER NOT NULL DEFAULT 0,
+                rule_version INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_member_behavior_profiles_member
+            ON "member_behavior_profiles" (member_id)
+            """
+        )
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_member_behavior_profiles_last_analyzed
+            ON "member_behavior_profiles" (last_analyzed_at)
+            """
+        )
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_messages_group_user_timestamp
+            ON "messages" (group_id, user_id, message_timestamp DESC)
+            """
+        )
+
     @classmethod
     def _backfill_version_5_schema(
         cls,
@@ -3736,6 +4138,52 @@ class GroupMemoryDatabase:
                         "group_id", "source_member_id", "target_member_id",
                         "event_type", "event_timestamp", "id",
                     ),
+                ),
+            },
+        )
+
+    @classmethod
+    def _validate_version_7_schema(cls, connection: sqlite3.Connection) -> None:
+        cls._validate_required_columns(
+            connection,
+            {
+                "member_behavior_profiles": {
+                    "member_id",
+                    "summary",
+                    "window_start_timestamp",
+                    "window_end_timestamp",
+                    "message_count",
+                    "active_day_count",
+                    "pending_message_count",
+                    "last_analyzed_at",
+                    "rule_version",
+                    "created_at",
+                    "updated_at",
+                },
+            },
+        )
+        cls._validate_foreign_keys(
+            connection,
+            "member_behavior_profiles",
+            {("member_id", "members", "id")},
+        )
+        if not cls._has_unique_index(
+            connection, "member_behavior_profiles", ("member_id",)
+        ):
+            raise ValueError(
+                "Database member_behavior_profiles table is missing its identity key."
+            )
+        cls._validate_named_indexes(
+            connection,
+            {
+                "idx_member_behavior_profiles_last_analyzed": (
+                    "member_behavior_profiles", ("last_analyzed_at",)
+                ),
+                "idx_member_behavior_profiles_member": (
+                    "member_behavior_profiles", ("member_id",)
+                ),
+                "idx_messages_group_user_timestamp": (
+                    "messages", ("group_id", "user_id", "message_timestamp")
                 ),
             },
         )

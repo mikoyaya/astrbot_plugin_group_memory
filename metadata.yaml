@@ -2,7 +2,7 @@ name: astrbot_plugin_group_memory
 display_name: QQ 群档案 / 群记忆
 desc: 面向 QQ 群聊的轻量群档案插件，记录群消息并提供成员备注、标签、基础画像和只读成员数据页。
 short_desc: QQ 群消息记录、成员备注与标签。
-version: v0.3.0
+version: v0.3.1
 author: mikoyaya
 repo: https://github.com/mikoyaya/astrbot_plugin_group_memory
 support_platforms:

@@ -27,6 +27,8 @@ const detailGroup = document.getElementById("detail-group");
 const detailMessageCount = document.getElementById("detail-message-count");
 const detailLastMessage = document.getElementById("detail-last-message");
 const detailProfile = document.getElementById("detail-profile");
+const detailAutoTagsSummary = document.getElementById("detail-auto-tags-summary");
+const detailProfileMeta = document.getElementById("detail-profile-meta");
 const detailNoteSummary = document.getElementById("detail-note-summary");
 const detailTagsSummary = document.getElementById("detail-tags-summary");
 const detailRelationshipCount = document.getElementById("detail-relationship-count");
@@ -73,6 +75,9 @@ const relationshipClose = document.getElementById("relationship-close");
 const relationshipSummary = document.getElementById("relationship-summary");
 const relationshipEvidenceList = document.getElementById("relationship-evidence-list");
 const relationshipMoreButton = document.getElementById("relationship-more-button");
+const AUTO_BEHAVIOR_TAGS = new Set([
+  "持续互动", "高频互动", "爱提问", "常发图片", "常发表情包",
+]);
 
 let members = [];
 let selectedMember = null;
@@ -129,6 +134,13 @@ function memberIdentity(member) {
 function tagsFor(member) {
   if (Array.isArray(member.tags)) return member.tags;
   return text(member.tags).split(",").map((tag) => tag.trim()).filter(Boolean);
+}
+
+function isAutoBehaviorTag(tag) {
+  return tag
+    && tag.layer === "observed"
+    && tag.source_type === "observed"
+    && AUTO_BEHAVIOR_TAGS.has(text(tag.name));
 }
 
 function memberStatusLabel(status) {
@@ -306,12 +318,18 @@ function renderLayeredTags(member) {
     layeredTagList.append(recordRow({ title: "暂无分层标签", meta: "人工标签与机器人观察会明确区分" }));
     return;
   }
-  tags.forEach((tag) => layeredTagList.append(recordRow({
-    title: tag.name,
-    meta: `${tag.layer} · ${Math.round(Number(tag.confidence || 0) * 100)}% · ${tag.source_type}`,
-    removeTitle: `删除标签 ${tag.name}`,
-    onRemove: tag.id ? () => removeLayeredTag(tag.id) : null,
-  })));
+  tags.forEach((rawTag) => {
+    const automatic = isAutoBehaviorTag(rawTag);
+    const tag = automatic
+      ? { ...rawTag, layer: "机器人观察", source_type: "规则版" }
+      : rawTag;
+    layeredTagList.append(recordRow({
+      title: tag.name,
+      meta: `${tag.layer} · ${Math.round(Number(tag.confidence || 0) * 100)}% · ${tag.source_type}`,
+      removeTitle: `删除标签 ${tag.name}`,
+      onRemove: tag.id && !automatic ? () => removeLayeredTag(tag.id) : null,
+    }));
+  });
 }
 
 function eventLabel(event) {
@@ -457,7 +475,16 @@ function renderDetail(member) {
   detailGroup.textContent = groupLabel(member);
   detailMessageCount.textContent = String(member.message_count || 0);
   detailLastMessage.textContent = formatTimestamp(member.last_message_timestamp);
-  detailProfile.textContent = member.summary || "暂无";
+  const behaviorProfile = member.behavior_profile && typeof member.behavior_profile === "object"
+    ? member.behavior_profile : {};
+  const autoTags = Array.isArray(behaviorProfile.auto_tags) ? behaviorProfile.auto_tags : [];
+  detailProfile.textContent = behaviorProfile.summary || "消息样本不足，继续记录后会生成内部画像。";
+  detailAutoTagsSummary.textContent = autoTags.length
+    ? autoTags.map((tag) => `${tag.name} · ${Math.round(Number(tag.confidence || 0) * 100)}%`).join("、")
+    : "暂无稳定自动标签";
+  detailProfileMeta.textContent = behaviorProfile.state === "ready"
+    ? `近 90 天 ${Number(behaviorProfile.message_count || 0)} 条消息 · ${Number(behaviorProfile.active_day_count || 0)} 个活跃日 · 更新于 ${formatTimestamp(behaviorProfile.last_analyzed_at)}`
+    : "样本收集中；达到规则阈值后自动更新。";
   detailNoteSummary.textContent = member.note || "暂无";
   detailTagsSummary.textContent = tagsFor(member).join("、") || "暂无";
   detailRelationshipCount.textContent = aggregates.length

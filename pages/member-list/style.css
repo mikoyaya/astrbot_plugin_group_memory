@@ -360,6 +360,16 @@ body.is-network-dragging, body.is-network-dragging * { user-select: none !import
   background: linear-gradient(145deg, color-mix(in srgb, var(--accent) 10%, var(--surface-muted)), var(--surface-muted)) !important;
 }
 .detail-summary-card dd { line-height: 1.45; }
+.internal-profile-hint {
+  margin: -4px 0 16px;
+  padding: 9px 10px;
+  border-left: 3px solid color-mix(in srgb, var(--accent) 68%, transparent);
+  border-radius: 0 7px 7px 0;
+  background: color-mix(in srgb, var(--accent) 8%, var(--surface-muted));
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.55;
+}
 .network-empty { padding: 34px 18px; color: var(--muted); font-size: 14px; text-align: center; }
 .relationship-dialog { width: min(720px, calc(100vw - 28px)); }
 .relationship-summary { margin-top: 14px; }

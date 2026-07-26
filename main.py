@@ -532,7 +532,7 @@ class GroupMemoryPlugin(Star):
             f"消息数：{profile['message_count']}\n"
             f"标签：{tags}\n"
             f"备注：{note}\n"
-            "自动画像：尚未启用"
+            "自动画像：仅在插件 WebUI 管理页显示"
         )
 
     @filter.command("配置", alias={"group-memory-config"})
@@ -1045,6 +1045,7 @@ class GroupMemoryPlugin(Star):
                 platform_id=identity["platform_id"],
                 external_group_id=identity["external_group_id"],
                 external_user_id=identity["external_user_id"],
+                include_behavior_profile=True,
             )
         except (ValueError, sqlite3.Error, OSError):
             self._log_exception_throttled(
