@@ -2034,6 +2034,13 @@ class GroupMemoryDatabase:
             )
             if aggregate["target_member_id"] is not None
         ]
+        direct_member_ids: set[int] = set()
+        for aggregate in aggregates:
+            if aggregate["source_member_id"] == center_member_id:
+                direct_member_ids.add(int(aggregate["target_member_id"]))
+            elif aggregate["target_member_id"] == center_member_id:
+                direct_member_ids.add(int(aggregate["source_member_id"]))
+
         selected_member_ids: set[int]
         if scope == "group":
             selected_member_ids = {
@@ -2046,13 +2053,8 @@ class GroupMemoryDatabase:
             }
             selected_member_ids.add(center_member_id)
         else:
-            one_hop = {center_member_id}
-            for aggregate in aggregates:
-                if aggregate["source_member_id"] == center_member_id:
-                    one_hop.add(int(aggregate["target_member_id"]))
-                elif aggregate["target_member_id"] == center_member_id:
-                    one_hop.add(int(aggregate["source_member_id"]))
-            selected_member_ids = one_hop
+            one_hop = {center_member_id, *direct_member_ids}
+            selected_member_ids = set(one_hop)
             if scope == "two_hop":
                 for aggregate in aggregates:
                     if (
@@ -2062,24 +2064,31 @@ class GroupMemoryDatabase:
                         selected_member_ids.add(int(aggregate["source_member_id"]))
                         selected_member_ids.add(int(aggregate["target_member_id"]))
 
-        ranked_members = self._rank_network_members(
-            aggregates, center_member_id=center_member_id, member_ids=selected_member_ids
+        ranked_direct_members = self._rank_direct_network_members(
+            aggregates,
+            center_member_id=center_member_id,
+            member_ids=direct_member_ids,
         )
-        chosen_member_ids = set(ranked_members[:max(node_limit - 1, 0)])
+        ranked_outer_members = self._rank_network_members(
+            aggregates,
+            center_member_id=center_member_id,
+            member_ids=selected_member_ids - direct_member_ids - {center_member_id},
+        )
+        ranked_members = ranked_direct_members + ranked_outer_members
+        node_capacity = max(node_limit - 1, 0)
+        direct_capacity = min(node_capacity, edge_limit)
+        chosen_ranked_members = (
+            ranked_direct_members[:direct_capacity]
+            + ranked_outer_members[:max(node_capacity - len(ranked_direct_members), 0)]
+        )
+        chosen_member_ids = set(chosen_ranked_members)
         chosen_member_ids.add(center_member_id)
-        visible_edges = [
-            aggregate
-            for aggregate in aggregates
-            if aggregate["source_member_id"] in chosen_member_ids
-            and aggregate["target_member_id"] in chosen_member_ids
-        ][:edge_limit]
-        visible_member_ids = {center_member_id}
-        for aggregate in visible_edges:
-            visible_member_ids.add(int(aggregate["source_member_id"]))
-            visible_member_ids.add(int(aggregate["target_member_id"]))
+        visible_edges = self._rank_network_edges(
+            aggregates, center_member_id=center_member_id, member_ids=chosen_member_ids
+        )[:edge_limit]
         nodes = [
             self._network_member_node(connection, member_id)
-            for member_id in sorted(visible_member_ids)
+            for member_id in sorted(chosen_member_ids)
         ]
         return {
             "center_member_id": center_member_id,
@@ -2088,7 +2097,7 @@ class GroupMemoryDatabase:
             "edges": visible_edges,
             "node_limit": node_limit,
             "edge_limit": edge_limit,
-            "has_more_nodes": len(ranked_members) > max(node_limit - 1, 0),
+            "has_more_nodes": len(ranked_members) > len(chosen_ranked_members),
             "has_more_edges": len(
                 [
                     aggregate
@@ -2256,21 +2265,136 @@ class GroupMemoryDatabase:
         center_member_id: int,
         member_ids: set[int],
     ) -> list[int]:
-        weights: dict[int, int] = {member_id: 0 for member_id in member_ids}
+        weights: dict[int, tuple[int, int]] = {
+            member_id: (0, 0) for member_id in member_ids
+        }
         for aggregate in aggregates:
             weight = int(aggregate["count"])
+            last_time = int(aggregate["last_time"])
             for member_id in (
                 aggregate["source_member_id"], aggregate["target_member_id"]
             ):
                 if member_id in weights and member_id != center_member_id:
-                    weights[member_id] += weight
+                    current_weight, current_last_time = weights[member_id]
+                    weights[member_id] = (
+                        current_weight + weight,
+                        max(current_last_time, last_time),
+                    )
         return [
             member_id
             for member_id, _ in sorted(
-                weights.items(), key=lambda item: (item[1], item[0]), reverse=True
+                weights.items(),
+                key=lambda item: (-item[1][0], -item[1][1], item[0]),
             )
             if member_id != center_member_id
         ]
+
+    @staticmethod
+    def _rank_direct_network_members(
+        aggregates: list[dict[str, object]],
+        *,
+        center_member_id: int,
+        member_ids: set[int],
+    ) -> list[int]:
+        """Rank direct neighbors without allowing outer activity to displace them."""
+        weights: dict[int, tuple[int, int]] = {
+            member_id: (0, 0) for member_id in member_ids
+        }
+        for aggregate in aggregates:
+            source_member_id = int(aggregate["source_member_id"])
+            target_member_id = int(aggregate["target_member_id"])
+            if source_member_id == center_member_id:
+                other_member_id = target_member_id
+            elif target_member_id == center_member_id:
+                other_member_id = source_member_id
+            else:
+                continue
+            if other_member_id not in weights:
+                continue
+            current_weight, current_last_time = weights[other_member_id]
+            weights[other_member_id] = (
+                current_weight + int(aggregate["count"]),
+                max(current_last_time, int(aggregate["last_time"])),
+            )
+        return [
+            member_id
+            for member_id, _ in sorted(
+                weights.items(),
+                key=lambda item: (-item[1][0], -item[1][1], item[0]),
+            )
+        ]
+
+    @staticmethod
+    def _rank_network_edges(
+        aggregates: list[dict[str, object]],
+        *,
+        center_member_id: int,
+        member_ids: set[int],
+    ) -> list[dict[str, object]]:
+        """Place center edges first so selected direct members stay connected."""
+        eligible = [
+            aggregate
+            for aggregate in aggregates
+            if int(aggregate["source_member_id"]) in member_ids
+            and int(aggregate["target_member_id"]) in member_ids
+        ]
+
+        def edge_key(aggregate: dict[str, object]) -> tuple[int, int, str, int, int]:
+            return (
+                -int(aggregate["count"]),
+                -int(aggregate["last_time"]),
+                str(aggregate["event_type"]),
+                int(aggregate["source_member_id"]),
+                int(aggregate["target_member_id"]),
+            )
+
+        direct_by_member: dict[int, list[dict[str, object]]] = {}
+        outer_edges: list[dict[str, object]] = []
+        for aggregate in eligible:
+            source_member_id = int(aggregate["source_member_id"])
+            target_member_id = int(aggregate["target_member_id"])
+            if source_member_id == center_member_id:
+                direct_by_member.setdefault(target_member_id, []).append(aggregate)
+            elif target_member_id == center_member_id:
+                direct_by_member.setdefault(source_member_id, []).append(aggregate)
+            else:
+                outer_edges.append(aggregate)
+
+        direct_members = sorted(
+            direct_by_member,
+            key=lambda member_id: (
+                -sum(int(item["count"]) for item in direct_by_member[member_id]),
+                -max(int(item["last_time"]) for item in direct_by_member[member_id]),
+                member_id,
+            ),
+        )
+        required_edges = [
+            sorted(direct_by_member[member_id], key=edge_key)[0]
+            for member_id in direct_members
+        ]
+        required_keys = {
+            (
+                int(aggregate["source_member_id"]),
+                int(aggregate["target_member_id"]),
+                str(aggregate["event_type"]),
+            )
+            for aggregate in required_edges
+        }
+        remaining_direct_edges = [
+            aggregate
+            for aggregates_for_member in direct_by_member.values()
+            for aggregate in aggregates_for_member
+            if (
+                int(aggregate["source_member_id"]),
+                int(aggregate["target_member_id"]),
+                str(aggregate["event_type"]),
+            ) not in required_keys
+        ]
+        return (
+            required_edges
+            + sorted(remaining_direct_edges, key=edge_key)
+            + sorted(outer_edges, key=edge_key)
+        )
 
     def _network_member_node(
         self, connection: sqlite3.Connection, member_id: int

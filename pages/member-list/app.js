@@ -87,6 +87,7 @@ let networkGraph = null;
 let networkViewport = { scale: 1, x: 0, y: 0 };
 let networkPointerState = null;
 let networkLoadToken = 0;
+let networkLayoutSnapshot = null;
 let suppressNetworkNodeClickUntil = 0;
 let memberRelationshipAnalysisToken = 0;
 
@@ -95,7 +96,6 @@ const NETWORK_HEIGHT = 620;
 const NETWORK_MIN_SCALE = 0.82;
 const NETWORK_MAX_SCALE = 2.2;
 const NETWORK_DRAG_THRESHOLD_PX = 6;
-const NETWORK_FIRST_LAYER_LIMIT = 6;
 const NETWORK_SECOND_LAYER_LIMIT = 12;
 
 function text(value, fallback = "") {
@@ -471,6 +471,7 @@ function setView(view) {
 
 function chooseNetworkCenter(member) {
   networkLoadToken += 1;
+  networkLayoutSnapshot = null;
   networkCenter = { ...memberIdentity(member), member_id: Number(member.member_id || 0) };
   networkCenterInput.value = member.nickname || member.user_id || member.external_user_id || "";
   networkData = null;
@@ -646,38 +647,47 @@ function networkLevelForMember(levels, memberId) {
   return levels.get(Number(memberId)) ?? 3;
 }
 
-function deriveNetworkLevels(nodes, pairs, centerMemberId) {
+function rankDirectNetworkMembers(pairs, centerMemberId) {
   const centerId = Number(centerMemberId);
   const direct = new Map();
+  pairs.forEach((pair) => {
+    const memberIds = [Number(pair.memberA.member_id), Number(pair.memberB.member_id)];
+    if (!memberIds.includes(centerId)) return;
+    const otherMemberId = memberIds.find((memberId) => memberId !== centerId);
+    if (otherMemberId === undefined) return;
+    const current = direct.get(otherMemberId) || { member_id: otherMemberId, weight: 0, last_time: 0 };
+    current.weight += Number(pair.weight || 0);
+    current.last_time = Math.max(current.last_time, Number(pair.last_time || 0));
+    direct.set(otherMemberId, current);
+  });
+  return sortByWeight([...direct.values()]);
+}
+
+function deriveNetworkLevels(nodes, pairs, centerMemberId) {
+  const centerId = Number(centerMemberId);
+  const directMemberIds = new Set(
+    rankDirectNetworkMembers(pairs, centerId).map((item) => item.member_id),
+  );
   const related = new Map();
   pairs.forEach((pair) => {
     const memberIds = [Number(pair.memberA.member_id), Number(pair.memberB.member_id)];
     memberIds.forEach((memberId) => {
-      if (memberId === centerId) return;
+      if (memberId === centerId || directMemberIds.has(memberId)) return;
       const current = related.get(memberId) || { member_id: memberId, weight: 0, last_time: 0, direct: false };
       current.weight += pair.weight;
       current.last_time = Math.max(current.last_time, pair.last_time);
       related.set(memberId, current);
     });
-    if (memberIds.includes(centerId)) {
-      const otherId = memberIds.find((memberId) => memberId !== centerId);
-      const current = direct.get(otherId) || { member_id: otherId, weight: 0, last_time: 0, direct: true };
-      current.weight += pair.weight;
-      current.last_time = Math.max(current.last_time, pair.last_time);
-      direct.set(otherId, current);
-    }
   });
-  const firstLayerIds = new Set(sortByWeight([...direct.values()])
-    .slice(0, NETWORK_FIRST_LAYER_LIMIT).map((item) => item.member_id));
   const secondCandidates = sortByWeight([...related.values()]
-    .filter((item) => !firstLayerIds.has(item.member_id)));
+    .filter((item) => !directMemberIds.has(item.member_id)));
   const secondLayerIds = new Set(secondCandidates
     .slice(0, NETWORK_SECOND_LAYER_LIMIT).map((item) => item.member_id));
   const levels = new Map([[centerId, 0]]);
   nodes.forEach((node) => {
     const memberId = Number(node.member_id);
     if (memberId === centerId) return;
-    levels.set(memberId, firstLayerIds.has(memberId) ? 1 : secondLayerIds.has(memberId) ? 2 : 3);
+    levels.set(memberId, directMemberIds.has(memberId) ? 1 : secondLayerIds.has(memberId) ? 2 : 3);
   });
   pairs.forEach((pair) => {
     pair.level = Math.max(
@@ -703,19 +713,30 @@ function positionLayer(nodes, radiusX, radiusY, positions) {
 function nodePositions(nodes, centerMemberId, levels, pairs) {
   const positions = new Map();
   const centerId = Number(centerMemberId);
+  const directOrder = new Map(
+    rankDirectNetworkMembers(pairs, centerId)
+      .map((item, index) => [Number(item.member_id), index]),
+  );
   positions.set(centerId, { x: NETWORK_WIDTH / 2, y: NETWORK_HEIGHT / 2 });
   [1, 2, 3].forEach((level) => {
     const layerNodes = nodes.filter((node) => Number(node.member_id) !== centerId
       && levels.get(Number(node.member_id)) === level)
       .sort((left, right) => {
+        if (level === 1) {
+          return (directOrder.get(Number(left.member_id)) ?? Number.MAX_SAFE_INTEGER)
+            - (directOrder.get(Number(right.member_id)) ?? Number.MAX_SAFE_INTEGER);
+        }
         const leftWeight = pairs.filter((pair) => Number(pair.memberA.member_id) === Number(left.member_id)
           || Number(pair.memberB.member_id) === Number(left.member_id)).reduce((sum, pair) => sum + pair.weight, 0);
         const rightWeight = pairs.filter((pair) => Number(pair.memberA.member_id) === Number(right.member_id)
           || Number(pair.memberB.member_id) === Number(right.member_id)).reduce((sum, pair) => sum + pair.weight, 0);
-        return rightWeight - leftWeight || Number(right.member_id) - Number(left.member_id);
+        return rightWeight - leftWeight || Number(left.member_id) - Number(right.member_id);
       });
     const radii = {
-      1: [235, 145],
+      1: [
+        Math.min(430, 235 + Math.max(0, layerNodes.length - 6) * 9),
+        Math.min(260, 145 + Math.max(0, layerNodes.length - 6) * 6),
+      ],
       2: [365, 225],
       3: [445, 270],
     }[level];
@@ -900,15 +921,50 @@ function screenDistance(pointerState, event) {
   return Math.hypot(event.clientX - pointerState.startClientX, event.clientY - pointerState.startClientY);
 }
 
+function networkContextKey() {
+  if (!networkCenter) return "";
+  return [
+    networkCenter.platform_id,
+    networkCenter.group_id,
+    networkCenter.member_id,
+    networkScopeInput.value,
+    networkTypeInput.value,
+    networkSourceInput.value,
+  ].join("|");
+}
+
+function captureNetworkLayoutSnapshot() {
+  if (!networkGraph) return;
+  const directMemberIds = networkGraph.collapsedDirectMemberIds || new Set();
+  const retainedMemberIds = new Set([
+    Number(networkGraph.centerMemberId),
+    ...directMemberIds,
+  ]);
+  const positions = new Map();
+  retainedMemberIds.forEach((memberId) => {
+    const position = networkGraph.positions.get(memberId);
+    if (position) positions.set(memberId, { ...position });
+  });
+  networkLayoutSnapshot = {
+    key: networkContextKey(),
+    directMemberIds: new Set(directMemberIds),
+    positions,
+  };
+}
+
 function applyNetworkVisibility() {
   if (!networkGraph) return;
   const centerNodeId = Number(networkGraph.centerMemberId);
+  const directMemberIds = networkGraph.directMemberIds || new Set();
+  const retainedDirectMemberIds = networkGraph.collapsedDirectMemberIds || new Set();
   const hiddenNodeIds = new Set();
+  directMemberIds.forEach((memberId) => {
+    if (!retainedDirectMemberIds.has(memberId)) hiddenNodeIds.add(memberId);
+  });
   if (!networkLowRelevanceVisible) {
     networkGraph.nodeElements.forEach((_, memberId) => {
       const normalizedMemberId = Number(memberId);
-      if (normalizedMemberId !== centerNodeId
-        && networkLevelForMember(networkGraph.levels, normalizedMemberId) === 3) {
+      if (normalizedMemberId !== centerNodeId && !directMemberIds.has(normalizedMemberId)) {
         hiddenNodeIds.add(normalizedMemberId);
       }
     });
@@ -936,10 +992,13 @@ function applyNetworkVisibility() {
     element.style.display = visible ? "" : "none";
     element.setAttribute("aria-hidden", String(!visible));
   });
-  const lowCount = [...networkGraph.levels.entries()]
-    .filter(([memberId, level]) => Number(memberId) !== centerNodeId && level === 3).length;
-  networkLowRelevanceButton.hidden = lowCount === 0;
-  networkLowRelevanceButton.textContent = networkLowRelevanceVisible ? "收起低相关节点" : "显示低相关节点";
+  const outerNodeCount = [...networkGraph.nodeElements.keys()]
+    .filter((memberId) => Number(memberId) !== centerNodeId && !directMemberIds.has(Number(memberId))).length;
+  networkLowRelevanceButton.hidden = outerNodeCount === 0;
+  const directSummary = `保留 ${retainedDirectMemberIds.size} 个直连`;
+  networkLowRelevanceButton.textContent = networkLowRelevanceVisible
+    ? `收起 ${outerNodeCount} 个外围节点（${directSummary}）`
+    : `显示 ${outerNodeCount} 个外围节点（${directSummary}）`;
   networkLowRelevanceButton.setAttribute("aria-pressed", String(networkLowRelevanceVisible));
 }
 
@@ -1038,6 +1097,8 @@ function addNetworkPointerInteractions() {
 function renderNetwork(network) {
   const nodes = Array.isArray(network.nodes) ? network.nodes : [];
   const aggregates = Array.isArray(network.edges) ? network.edges : [];
+  const layoutSnapshot = networkLayoutSnapshot?.key === networkContextKey()
+    ? networkLayoutSnapshot : null;
   networkCanvas.replaceChildren();
   networkGraph = null;
   hideNetworkTooltip();
@@ -1065,6 +1126,20 @@ function renderNetwork(network) {
   const pairs = buildRelationshipPairs(aggregates, nodes);
   const levels = deriveNetworkLevels(nodes, pairs, network.center_member_id);
   const positions = nodePositions(nodes, network.center_member_id, levels, pairs);
+  const directMembers = rankDirectNetworkMembers(pairs, network.center_member_id);
+  const directMemberIds = new Set(directMembers.map((item) => Number(item.member_id)));
+  const defaultDirectCapacity = Math.max(0, Number(network.node_limit || 30) - 1);
+  const collapsedDirectMemberIds = layoutSnapshot
+    ? new Set([...layoutSnapshot.directMemberIds].filter((memberId) => directMemberIds.has(memberId)))
+    : new Set(directMembers.slice(0, defaultDirectCapacity).map((item) => Number(item.member_id)));
+  if (layoutSnapshot) {
+    layoutSnapshot.positions.forEach((position, memberId) => {
+      if (Number(memberId) === Number(network.center_member_id)
+        || collapsedDirectMemberIds.has(Number(memberId))) {
+        positions.set(Number(memberId), { ...position });
+      }
+    });
+  }
   const background = svgElement("rect", { x: 0, y: 0, width: NETWORK_WIDTH, height: NETWORK_HEIGHT, class: "network-svg-background" });
   const viewport = svgElement("g", { class: "network-viewport" });
   const edgeLayer = svgElement("g", { class: "network-edge-layer" });
@@ -1074,6 +1149,7 @@ function renderNetwork(network) {
   networkGraph = {
     nodes, aggregates, pairs, levels, positions, viewport,
     centerMemberId: Number(network.center_member_id),
+    directMemberIds, collapsedDirectMemberIds,
     nodeElements: new Map(), pairElements: new Map(),
   };
 
@@ -1558,6 +1634,7 @@ networkLoadButton.addEventListener("click", () => {
   loadNetwork();
 });
 networkExpandButton.addEventListener("click", () => {
+  captureNetworkLayoutSnapshot();
   networkExpanded = true;
   loadNetwork();
 });
@@ -1566,9 +1643,14 @@ networkLowRelevanceButton.addEventListener("click", () => {
   applyNetworkVisibility();
 });
 networkResetViewButton.addEventListener("click", resetNetworkView);
-networkScopeInput.addEventListener("change", () => { networkExpanded = false; loadNetwork(); });
-networkTypeInput.addEventListener("change", () => { networkExpanded = false; loadNetwork(); });
-networkSourceInput.addEventListener("change", () => { networkExpanded = false; loadNetwork(); });
+function reloadNetworkForNewContext() {
+  networkExpanded = false;
+  networkLayoutSnapshot = null;
+  loadNetwork();
+}
+networkScopeInput.addEventListener("change", reloadNetworkForNewContext);
+networkTypeInput.addEventListener("change", reloadNetworkForNewContext);
+networkSourceInput.addEventListener("change", reloadNetworkForNewContext);
 relationshipClose.addEventListener("click", () => relationshipDialog.close());
 relationshipMoreButton.addEventListener("click", () => loadAggregateEvidence(true));
 dialogClose.addEventListener("click", () => dialog.close());
