@@ -124,14 +124,6 @@ function sourceCountsLabel(sourceCounts) {
   return entries.map(([source, count]) => `${eventSourceLabel(source)} ${count}`).join("；");
 }
 
-function queryString(values) {
-  const query = new URLSearchParams();
-  Object.entries(values).forEach(([key, value]) => {
-    if (value !== undefined && value !== null && value !== "") query.set(key, String(value));
-  });
-  return query.toString();
-}
-
 function sameMember(left, right) {
   const leftId = memberIdentity(left);
   const rightId = memberIdentity(right);
@@ -411,15 +403,15 @@ async function loadNetwork() {
   networkLoadButton.disabled = true;
   networkStatus.textContent = "正在加载关系网…";
   try {
-    const query = new URLSearchParams({
+    const parameters = {
       ...networkCenter,
       scope: networkScopeInput.value,
-      node_limit: networkExpanded ? "100" : "30",
-      edge_limit: networkExpanded ? "200" : "50",
-    });
-    if (networkTypeInput.value) query.append("event_type", networkTypeInput.value);
-    if (networkSourceInput.value) query.append("source_type", networkSourceInput.value);
-    networkData = await bridge.apiGet(`relationship-network?${query.toString()}`);
+      node_limit: networkExpanded ? 100 : 30,
+      edge_limit: networkExpanded ? 200 : 50,
+    };
+    if (networkTypeInput.value) parameters.event_type = networkTypeInput.value;
+    if (networkSourceInput.value) parameters.source_type = networkSourceInput.value;
+    networkData = await bridge.apiGet("relationship-network", parameters);
     renderNetwork(networkData);
   } catch (error) {
     networkData = null;
@@ -539,16 +531,20 @@ async function loadAggregateEvidence(append = false) {
   relationshipMoreButton.disabled = true;
   try {
     const cursor = append ? evidenceCursor : null;
-    const query = queryString({
+    const parameters = {
       platform_id: activeAggregateIdentity.platform_id,
       group_id: activeAggregateIdentity.group_id,
       source_member_id: activeAggregate.source_member_id,
-      target_member_id: activeAggregate.target_member_id,
       event_type: activeAggregate.event_type,
-      before_timestamp: cursor?.before_timestamp,
-      before_id: cursor?.before_id,
-    });
-    const result = await bridge.apiGet(`relationship-aggregate-events?${query}`);
+    };
+    if (activeAggregate.target_member_id !== null && activeAggregate.target_member_id !== undefined) {
+      parameters.target_member_id = activeAggregate.target_member_id;
+    }
+    if (cursor) {
+      parameters.before_timestamp = cursor.before_timestamp;
+      parameters.before_id = cursor.before_id;
+    }
+    const result = await bridge.apiGet("relationship-aggregate-events", parameters);
     if (!append) relationshipEvidenceList.replaceChildren();
     const events = Array.isArray(result.events) ? result.events : [];
     events.forEach((event) => relationshipEvidenceList.append(recordRow({
