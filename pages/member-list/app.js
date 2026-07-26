@@ -86,6 +86,7 @@ let evidenceCursor = null;
 let networkGraph = null;
 let networkViewport = { scale: 1, x: 0, y: 0 };
 let networkPointerState = null;
+let networkLoadToken = 0;
 let suppressNetworkNodeClickUntil = 0;
 let memberRelationshipAnalysisToken = 0;
 
@@ -469,13 +470,25 @@ function setView(view) {
 }
 
 function chooseNetworkCenter(member) {
+  networkLoadToken += 1;
   networkCenter = { ...memberIdentity(member), member_id: Number(member.member_id || 0) };
   networkCenterInput.value = member.nickname || member.user_id || member.external_user_id || "";
   networkData = null;
   networkExpanded = false;
+  networkLowRelevanceVisible = false;
+  networkPointerState = null;
+  suppressNetworkNodeClickUntil = 0;
+  document.body.classList.remove("is-network-dragging");
+  networkCanvas.classList.remove("is-dragging-node", "is-panning");
+  networkGraph = null;
+  networkCanvas.replaceChildren();
+  hideNetworkTooltip();
+  resetNetworkViewport();
+  networkLowRelevanceButton.hidden = true;
+  networkLowRelevanceButton.textContent = "显示低相关节点";
+  networkLowRelevanceButton.setAttribute("aria-pressed", "false");
   networkCenterResults.hidden = true;
   setView("network");
-  loadNetwork();
 }
 
 function filteredCenterMembers(query) {
@@ -510,20 +523,25 @@ async function loadNetwork() {
     hideNetworkTooltip();
     return;
   }
+  const loadToken = ++networkLoadToken;
+  const center = { ...networkCenter };
   networkLoadButton.disabled = true;
   networkStatus.textContent = "正在加载关系网…";
   try {
     const parameters = {
-      ...networkCenter,
+      ...center,
       scope: networkScopeInput.value,
       node_limit: networkExpanded ? 100 : 30,
       edge_limit: networkExpanded ? 200 : 50,
     };
     if (networkTypeInput.value) parameters.event_type = networkTypeInput.value;
     if (networkSourceInput.value) parameters.source_type = networkSourceInput.value;
-    networkData = await bridge.apiGet("relationship-network", parameters);
+    const loadedNetwork = await bridge.apiGet("relationship-network", parameters);
+    if (loadToken !== networkLoadToken) return;
+    networkData = loadedNetwork;
     renderNetwork(networkData);
   } catch (error) {
+    if (loadToken !== networkLoadToken) return;
     networkData = null;
     networkCanvas.replaceChildren();
     networkGraph = null;
@@ -531,7 +549,7 @@ async function loadNetwork() {
     networkEmpty.hidden = false;
     networkStatus.textContent = error.message || "读取关系网失败";
   } finally {
-    networkLoadButton.disabled = false;
+    if (loadToken === networkLoadToken) networkLoadButton.disabled = false;
   }
 }
 
@@ -624,6 +642,10 @@ function sortByWeight(items) {
     || Number(left.member_id || left.memberA?.member_id || 0) - Number(right.member_id || right.memberA?.member_id || 0));
 }
 
+function networkLevelForMember(levels, memberId) {
+  return levels.get(Number(memberId)) ?? 3;
+}
+
 function deriveNetworkLevels(nodes, pairs, centerMemberId) {
   const centerId = Number(centerMemberId);
   const direct = new Map();
@@ -658,7 +680,10 @@ function deriveNetworkLevels(nodes, pairs, centerMemberId) {
     levels.set(memberId, firstLayerIds.has(memberId) ? 1 : secondLayerIds.has(memberId) ? 2 : 3);
   });
   pairs.forEach((pair) => {
-    pair.level = Math.max(levels.get(Number(pair.memberA.member_id)) || 3, levels.get(Number(pair.memberB.member_id)) || 3);
+    pair.level = Math.max(
+      networkLevelForMember(levels, pair.memberA.member_id),
+      networkLevelForMember(levels, pair.memberB.member_id),
+    );
   });
   return levels;
 }
@@ -877,21 +902,42 @@ function screenDistance(pointerState, event) {
 
 function applyNetworkVisibility() {
   if (!networkGraph) return;
+  const centerNodeId = Number(networkGraph.centerMemberId);
+  const hiddenNodeIds = new Set();
+  if (!networkLowRelevanceVisible) {
+    networkGraph.nodeElements.forEach((_, memberId) => {
+      const normalizedMemberId = Number(memberId);
+      if (normalizedMemberId !== centerNodeId
+        && networkLevelForMember(networkGraph.levels, normalizedMemberId) === 3) {
+        hiddenNodeIds.add(normalizedMemberId);
+      }
+    });
+  }
+  hiddenNodeIds.delete(centerNodeId);
+  const visibleNodeIds = new Set();
+  networkGraph.nodeElements.forEach((_, memberId) => {
+    const normalizedMemberId = Number(memberId);
+    if (!hiddenNodeIds.has(normalizedMemberId)) visibleNodeIds.add(normalizedMemberId);
+  });
+  visibleNodeIds.add(centerNodeId);
+  networkGraph.hiddenNodeIds = hiddenNodeIds;
   networkGraph.nodeElements.forEach((element, memberId) => {
-    const level = networkGraph.levels.get(Number(memberId)) || 3;
-    const visible = level !== 3 || networkLowRelevanceVisible;
+    const visible = visibleNodeIds.has(Number(memberId));
     element.hidden = !visible;
     element.style.display = visible ? "" : "none";
     element.setAttribute("aria-hidden", String(!visible));
   });
   networkGraph.pairElements.forEach((element, pairId) => {
     const pair = networkGraph.pairs.find((item) => item.id === pairId);
-    const visible = networkLowRelevanceVisible || pair.level !== 3;
+    const visible = Boolean(pair)
+      && !hiddenNodeIds.has(Number(pair.memberA.member_id))
+      && !hiddenNodeIds.has(Number(pair.memberB.member_id));
     element.hidden = !visible;
     element.style.display = visible ? "" : "none";
     element.setAttribute("aria-hidden", String(!visible));
   });
-  const lowCount = [...networkGraph.levels.values()].filter((level) => level === 3).length;
+  const lowCount = [...networkGraph.levels.entries()]
+    .filter(([memberId, level]) => Number(memberId) !== centerNodeId && level === 3).length;
   networkLowRelevanceButton.hidden = lowCount === 0;
   networkLowRelevanceButton.textContent = networkLowRelevanceVisible ? "收起低相关节点" : "显示低相关节点";
   networkLowRelevanceButton.setAttribute("aria-pressed", String(networkLowRelevanceVisible));
@@ -1073,7 +1119,7 @@ function renderNetwork(network) {
     const position = positions.get(Number(node.member_id));
     if (!position) return;
     const isCenter = Number(node.member_id) === Number(network.center_member_id);
-    const level = levels.get(Number(node.member_id)) || 3;
+    const level = networkLevelForMember(levels, node.member_id);
     const group = svgElement("g", {
       class: `network-node ${isCenter ? "center" : ""} level-${level} ${node.member_status === "mentioned_only" ? "mentioned-only" : ""}`,
       tabindex: 0, role: "button", "data-member-id": Number(node.member_id),
