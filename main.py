@@ -10,8 +10,8 @@ from pathlib import Path
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star
-from astrbot.api.web import error_response, json_response, request
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path
+from quart import jsonify, request
 
 from .storage import GroupMemoryDatabase
 
@@ -380,7 +380,7 @@ class GroupMemoryPlugin(Star):
     async def webui_members(self):
         """Return a read-only member list to the bundled AstrBot plugin Page."""
         if not self.database_ready or self.database is None:
-            return error_response("数据库尚未就绪", status_code=503)
+            return jsonify({"status": "error", "message": "数据库尚未就绪"}), 503
         database = self.database
         try:
             configured_limit = await asyncio.to_thread(
@@ -388,7 +388,7 @@ class GroupMemoryPlugin(Star):
                 "webui_member_limit",
                 str(GroupMemoryDatabase.DEFAULT_WEBUI_MEMBER_LIMIT),
             )
-            requested_limit = request.query.get("limit", configured_limit, type=int)
+            requested_limit = request.args.get("limit", configured_limit, type=int)
             members = await asyncio.to_thread(
                 database.list_member_overview, requested_limit
             )
@@ -396,8 +396,8 @@ class GroupMemoryPlugin(Star):
             self._log_exception_throttled(
                 "webui-members-failed", "QQ 群档案插件读取 WebUI 成员数据失败。"
             )
-            return error_response("读取成员数据失败", status_code=500)
-        return json_response({"members": members, "count": len(members)})
+            return jsonify({"status": "error", "message": "读取成员数据失败"}), 500
+        return jsonify({"members": members, "count": len(members)})
 
     async def _database_call(self, warning_key: str, operation, *args, **kwargs):
         """Run short SQLite operations away from AstrBot's event loop."""
