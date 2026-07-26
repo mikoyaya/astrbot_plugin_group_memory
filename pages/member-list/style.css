@@ -116,7 +116,7 @@ tbody tr:last-child td { border-bottom: 0; }
 .empty-state strong { display: block; margin-bottom: 8px; font-size: 16px; }
 .empty-state p { margin: 0; color: var(--muted); font-size: 14px; }
 
-.member-dialog { width: min(680px, calc(100vw - 28px)); max-height: min(760px, calc(100vh - 28px)); padding: 0; border: 1px solid var(--border); border-radius: 7px; background: var(--surface); color: var(--text); box-shadow: 0 18px 60px rgba(0, 0, 0, 0.28); }
+.member-dialog { width: min(760px, calc(100vw - 28px)); max-height: min(820px, calc(100vh - 28px)); padding: 0; border: 1px solid var(--border); border-radius: 7px; background: var(--surface); color: var(--text); box-shadow: 0 18px 60px rgba(0, 0, 0, 0.28); }
 .member-dialog::backdrop { background: rgba(15, 23, 42, 0.46); }
 .dialog-shell { padding: 22px; overflow-y: auto; }
 .dialog-header { display: flex; justify-content: space-between; gap: 16px; align-items: flex-start; }
@@ -142,6 +142,28 @@ textarea:focus, .tag-editor input:focus { border-color: var(--accent); }
 .tag-chip button { width: 18px; height: 18px; padding: 0; border: 0; border-radius: 3px; background: transparent; color: inherit; cursor: pointer; font-size: 17px; line-height: 1; }
 .tag-chip button:hover:not(:disabled) { background: color-mix(in srgb, var(--accent) 18%, transparent); }
 .muted-text { color: var(--muted); font-size: 13px; }
+.form-grid { display: grid; gap: 8px; }
+.compact-grid { grid-template-columns: minmax(0, 1fr) 150px auto; }
+.layered-tag-grid { grid-template-columns: minmax(0, 1fr) 190px 84px auto; }
+.merge-grid { grid-template-columns: minmax(0, 0.85fr) minmax(0, 1.25fr) auto; margin-top: 10px; }
+.event-grid { grid-template-columns: 150px minmax(0, 1fr) 84px auto; }
+.event-grid textarea { grid-column: 1 / -2; }
+.form-grid input, .form-grid select { width: 100%; height: 34px; padding: 0 9px; border: 1px solid var(--border); border-radius: 5px; outline: none; background: var(--surface); color: var(--text); }
+.form-grid textarea { min-height: 58px; }
+.form-grid input:focus, .form-grid select:focus { border-color: var(--accent); }
+.danger-button { height: 34px; padding: 0 12px; border: 1px solid #b42318; border-radius: 5px; background: #b42318; color: #fff; cursor: pointer; font-size: 13px; white-space: nowrap; }
+.danger-button:hover:not(:disabled) { background: #8d1c13; }
+.danger-button:disabled { cursor: wait; opacity: 0.55; }
+.record-list { display: grid; gap: 7px; min-height: 28px; }
+.record-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 5px; background: var(--surface-muted); }
+.record-row div { min-width: 0; }
+.record-row strong, .record-row span { display: block; overflow-wrap: anywhere; }
+.record-row strong { font-size: 13px; font-weight: 600; }
+.record-row span { margin-top: 3px; color: var(--muted); font-size: 12px; white-space: pre-wrap; }
+.record-remove { flex: 0 0 auto; width: 24px; height: 24px; padding: 0; border: 0; border-radius: 4px; background: transparent; color: var(--muted); cursor: pointer; font-size: 19px; line-height: 1; }
+.record-remove:hover { background: rgba(180, 35, 24, 0.12); color: #b42318; }
+.record-remove:focus-visible, .danger-button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.event-list .record-row span { line-height: 1.45; }
 
 @media (max-width: 640px) {
   .page-shell { padding: 16px; }
@@ -151,4 +173,7 @@ textarea:focus, .tag-editor input:focus { border-color: var(--accent); }
   .detail-grid { grid-template-columns: 1fr; }
   .tag-editor { align-items: stretch; flex-direction: column; }
   .tag-editor .command-button { width: 100%; }
+  .compact-grid, .layered-tag-grid, .merge-grid, .event-grid { grid-template-columns: 1fr; }
+  .event-grid textarea { grid-column: auto; }
+  .form-grid .command-button, .form-grid .danger-button { width: 100%; }
 }

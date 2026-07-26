@@ -66,6 +66,42 @@ class GroupMemoryPlugin(Star):
             ["POST"],
             "Remove one tag from a recorded QQ group member.",
         )
+        context.register_web_api(
+            f"/{PLUGIN_NAME}/member/aliases/add",
+            self.webui_member_alias_add,
+            ["POST"],
+            "Add a manually verified alias to a group member.",
+        )
+        context.register_web_api(
+            f"/{PLUGIN_NAME}/member/aliases/remove",
+            self.webui_member_alias_remove,
+            ["POST"],
+            "Remove one member alias.",
+        )
+        context.register_web_api(
+            f"/{PLUGIN_NAME}/member/merge",
+            self.webui_member_merge,
+            ["POST"],
+            "Manually merge one group member identity into another.",
+        )
+        context.register_web_api(
+            f"/{PLUGIN_NAME}/member/layered-tags/add",
+            self.webui_layered_tag_add,
+            ["POST"],
+            "Add a layered member tag without automatic fact promotion.",
+        )
+        context.register_web_api(
+            f"/{PLUGIN_NAME}/member/layered-tags/remove",
+            self.webui_layered_tag_remove,
+            ["POST"],
+            "Remove one layered member tag.",
+        )
+        context.register_web_api(
+            f"/{PLUGIN_NAME}/relationship-events",
+            self.webui_relationship_events,
+            ["GET", "POST"],
+            "List or create auditable relationship events.",
+        )
 
         try:
             database_path = self._get_database_path()
@@ -507,6 +543,216 @@ class GroupMemoryPlugin(Star):
             )
             return self._webui_error("删除标签失败", status_code=500)
         return await self._webui_member_response(identity)
+
+    async def webui_member_alias_add(self):
+        """Add a manual member alias from the plugin Page."""
+        payload = await self._webui_json_payload()
+        if payload is None:
+            return self._webui_error("请求数据格式不正确")
+        identity = self._webui_member_identity(payload)
+        alias = self._as_text(payload.get("alias"))
+        alias_type = self._as_text(payload.get("alias_type")) or "manual"
+        confidence = payload.get("confidence", 1.0)
+        if identity is None or not alias:
+            return self._webui_error("成员定位信息和别名不能为空")
+        if not self._database_is_ready_for_webui():
+            return self._webui_database_not_ready()
+        try:
+            await asyncio.to_thread(
+                self.database.add_member_alias,
+                platform_id=identity["platform_id"],
+                external_group_id=identity["external_group_id"],
+                external_user_id=identity["external_user_id"],
+                alias=alias,
+                alias_type=alias_type,
+                confidence=confidence,
+            )
+        except (TypeError, ValueError, sqlite3.Error, OSError):
+            self._log_exception_throttled(
+                "webui-alias-add-failed", "QQ 群档案插件添加成员别名失败。"
+            )
+            return self._webui_error("添加别名失败", status_code=500)
+        return await self._webui_member_response(identity)
+
+    async def webui_member_alias_remove(self):
+        """Remove a manual or observed alias from the plugin Page."""
+        payload = await self._webui_json_payload()
+        if payload is None:
+            return self._webui_error("请求数据格式不正确")
+        identity = self._webui_member_identity(payload)
+        alias_id = payload.get("alias_id")
+        if identity is None or alias_id is None:
+            return self._webui_error("成员定位信息和别名编号不能为空")
+        if not self._database_is_ready_for_webui():
+            return self._webui_database_not_ready()
+        try:
+            await asyncio.to_thread(
+                self.database.remove_member_alias,
+                platform_id=identity["platform_id"],
+                external_group_id=identity["external_group_id"],
+                external_user_id=identity["external_user_id"],
+                alias_id=alias_id,
+            )
+        except (TypeError, ValueError, sqlite3.Error, OSError):
+            self._log_exception_throttled(
+                "webui-alias-remove-failed", "QQ 群档案插件删除成员别名失败。"
+            )
+            return self._webui_error("删除别名失败", status_code=500)
+        return await self._webui_member_response(identity)
+
+    async def webui_member_merge(self):
+        """Persist a manually confirmed merge without deleting historical records."""
+        payload = await self._webui_json_payload()
+        if payload is None:
+            return self._webui_error("请求数据格式不正确")
+        identity = self._webui_member_identity(payload)
+        target_user_id = self._as_text(
+            payload.get("target_user_id") or payload.get("target_external_user_id")
+        )
+        reason = self._as_text(payload.get("reason"))
+        if identity is None or not target_user_id:
+            return self._webui_error("来源成员和目标成员不能为空")
+        if target_user_id == identity["external_user_id"]:
+            return self._webui_error("来源成员和目标成员不能相同")
+        if not self._database_is_ready_for_webui():
+            return self._webui_database_not_ready()
+        try:
+            await asyncio.to_thread(
+                self.database.merge_members,
+                platform_id=identity["platform_id"],
+                external_group_id=identity["external_group_id"],
+                source_external_user_id=identity["external_user_id"],
+                target_external_user_id=target_user_id,
+                reason=reason,
+            )
+        except (TypeError, ValueError, sqlite3.Error, OSError):
+            self._log_exception_throttled(
+                "webui-member-merge-failed", "QQ 群档案插件合并成员身份失败。"
+            )
+            return self._webui_error("合并成员身份失败", status_code=500)
+        return jsonify({"status": "ok"})
+
+    async def webui_layered_tag_add(self):
+        """Create a scoped tag with explicit layer and provenance."""
+        payload = await self._webui_json_payload()
+        if payload is None:
+            return self._webui_error("请求数据格式不正确")
+        identity = self._webui_member_identity(payload)
+        tag_name = self._as_text(payload.get("tag_name"))
+        layer = self._as_text(payload.get("layer")) or "manual"
+        source_type = self._as_text(payload.get("source_type")) or "manual"
+        confidence = payload.get("confidence", 1.0)
+        if identity is None or not tag_name:
+            return self._webui_error("成员定位信息和标签不能为空")
+        if not self._database_is_ready_for_webui():
+            return self._webui_database_not_ready()
+        try:
+            await asyncio.to_thread(
+                self.database.add_layered_tag,
+                platform_id=identity["platform_id"],
+                external_group_id=identity["external_group_id"],
+                external_user_id=identity["external_user_id"],
+                tag_name=tag_name,
+                layer=layer,
+                confidence=confidence,
+                source_type=source_type,
+            )
+        except (TypeError, ValueError, sqlite3.Error, OSError):
+            self._log_exception_throttled(
+                "webui-layered-tag-add-failed", "QQ 群档案插件添加分层标签失败。"
+            )
+            return self._webui_error("添加分层标签失败", status_code=500)
+        return await self._webui_member_response(identity)
+
+    async def webui_layered_tag_remove(self):
+        """Remove one v4 layered tag record from the plugin Page."""
+        payload = await self._webui_json_payload()
+        if payload is None:
+            return self._webui_error("请求数据格式不正确")
+        identity = self._webui_member_identity(payload)
+        tag_id = payload.get("tag_id")
+        if identity is None or tag_id is None:
+            return self._webui_error("成员定位信息和标签编号不能为空")
+        if not self._database_is_ready_for_webui():
+            return self._webui_database_not_ready()
+        try:
+            await asyncio.to_thread(
+                self.database.remove_layered_tag,
+                platform_id=identity["platform_id"],
+                external_group_id=identity["external_group_id"],
+                external_user_id=identity["external_user_id"],
+                tag_id=tag_id,
+            )
+        except (TypeError, ValueError, sqlite3.Error, OSError):
+            self._log_exception_throttled(
+                "webui-layered-tag-remove-failed", "QQ 群档案插件删除分层标签失败。"
+            )
+            return self._webui_error("删除分层标签失败", status_code=500)
+        return await self._webui_member_response(identity)
+
+    async def webui_relationship_events(self):
+        """List events or append a manual evidence record from the plugin Page."""
+        if request.method == "GET":
+            platform_id = self._as_text(request.args.get("platform_id"))
+            external_group_id = self._as_text(
+                request.args.get("group_id") or request.args.get("external_group_id")
+            )
+            external_user_id = self._as_text(
+                request.args.get("user_id") or request.args.get("external_user_id")
+            )
+            if not platform_id or not external_group_id:
+                return self._webui_error("平台和群号不能为空")
+            if not self._database_is_ready_for_webui():
+                return self._webui_database_not_ready()
+            try:
+                limit = request.args.get("limit", 50, type=int)
+                events = await asyncio.to_thread(
+                    self.database.list_relationship_events,
+                    platform_id=platform_id,
+                    external_group_id=external_group_id,
+                    external_user_id=external_user_id or None,
+                    limit=limit,
+                )
+            except (TypeError, ValueError, sqlite3.Error, OSError):
+                self._log_exception_throttled(
+                    "webui-event-list-failed", "QQ 群档案插件读取关系事件失败。"
+                )
+                return self._webui_error("读取关系事件失败", status_code=500)
+            return jsonify({"events": events, "count": len(events)})
+
+        payload = await self._webui_json_payload()
+        if payload is None:
+            return self._webui_error("请求数据格式不正确")
+        identity = self._webui_member_identity(payload)
+        target_user_id = self._as_text(
+            payload.get("target_user_id") or payload.get("target_external_user_id")
+        )
+        event_type = self._as_text(payload.get("event_type"))
+        content = self._as_text(payload.get("content"))
+        source_type = self._as_text(payload.get("source_type")) or "manual"
+        confidence = payload.get("confidence", 1.0)
+        if identity is None or not event_type or not content:
+            return self._webui_error("来源成员、事件类型和内容不能为空")
+        if not self._database_is_ready_for_webui():
+            return self._webui_database_not_ready()
+        try:
+            await asyncio.to_thread(
+                self.database.add_relationship_event,
+                platform_id=identity["platform_id"],
+                external_group_id=identity["external_group_id"],
+                source_external_user_id=identity["external_user_id"],
+                target_external_user_id=target_user_id or None,
+                event_type=event_type,
+                content=content,
+                confidence=confidence,
+                source_type=source_type,
+            )
+        except (TypeError, ValueError, sqlite3.Error, OSError):
+            self._log_exception_throttled(
+                "webui-event-write-failed", "QQ 群档案插件保存关系事件失败。"
+            )
+            return self._webui_error("保存关系事件失败", status_code=500)
+        return jsonify({"status": "ok"})
 
     async def _webui_member_response(self, identity: dict[str, str]):
         """Load the latest details after a Page read or mutation."""

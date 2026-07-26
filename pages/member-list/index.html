@@ -88,6 +88,66 @@
             <button id="add-tag-button" class="command-button" type="button">添加标签</button>
           </div>
         </section>
+
+        <section class="editor-section" aria-labelledby="alias-heading">
+          <div class="section-heading">
+            <h3 id="alias-heading">别名与身份</h3>
+          </div>
+          <div id="alias-list" class="record-list" aria-label="成员别名"></div>
+          <div class="form-grid compact-grid">
+            <input id="alias-input" type="text" maxlength="64" placeholder="添加常用称呼或历史别名" />
+            <select id="alias-type-input" aria-label="别名类型">
+              <option value="manual">人工确认</option>
+              <option value="historical">历史别名</option>
+              <option value="group_note">群备注</option>
+            </select>
+            <button id="add-alias-button" class="command-button" type="button">添加别名</button>
+          </div>
+          <div class="form-grid merge-grid">
+            <input id="merge-target-input" type="text" inputmode="numeric" placeholder="目标成员 QQ 号" />
+            <input id="merge-reason-input" type="text" maxlength="120" placeholder="合并原因（可选）" />
+            <button id="merge-member-button" class="danger-button" type="button">合并到该成员</button>
+          </div>
+        </section>
+
+        <section class="editor-section" aria-labelledby="layered-tag-heading">
+          <div class="section-heading">
+            <h3 id="layered-tag-heading">分层标签</h3>
+          </div>
+          <div id="layered-tag-list" class="record-list" aria-label="分层标签"></div>
+          <div class="form-grid layered-tag-grid">
+            <input id="layered-tag-input" type="text" maxlength="64" placeholder="标签名称" />
+            <select id="tag-layer-input" aria-label="标签层级">
+              <option value="manual">manual 人工修改</option>
+              <option value="observed">observed 机器人观察</option>
+              <option value="reported">reported 他人转述</option>
+              <option value="confirmed">confirmed 确认事实</option>
+            </select>
+            <input id="tag-confidence-input" type="number" min="0" max="1" step="0.05" value="1" aria-label="标签置信度" />
+            <button id="add-layered-tag-button" class="command-button" type="button">添加分层标签</button>
+          </div>
+        </section>
+
+        <section class="editor-section" aria-labelledby="event-heading">
+          <div class="section-heading">
+            <h3 id="event-heading">关系事件</h3>
+          </div>
+          <div id="relationship-event-list" class="record-list event-list" aria-label="关系事件"></div>
+          <div class="form-grid event-grid">
+            <select id="event-type-input" aria-label="事件类型">
+              <option value="mention">提及</option>
+              <option value="evaluation">评价</option>
+              <option value="praise">夸赞</option>
+              <option value="complaint">抱怨</option>
+              <option value="reported">传闻/转述</option>
+              <option value="confirmation">确认行为</option>
+            </select>
+            <input id="event-target-input" type="text" inputmode="numeric" placeholder="目标成员 QQ 号（可选）" />
+            <input id="event-confidence-input" type="number" min="0" max="1" step="0.05" value="1" aria-label="事件置信度" />
+            <textarea id="event-content-input" rows="2" maxlength="500" placeholder="记录事件内容与上下文"></textarea>
+            <button id="add-event-button" class="command-button" type="button">记录事件</button>
+          </div>
+        </section>
       </section>
     </dialog>
     <script type="module" src="./app.js"></script>

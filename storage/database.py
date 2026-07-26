@@ -5,7 +5,9 @@ from __future__ import annotations
 import sqlite3
 import time
 from collections.abc import Callable
+from difflib import SequenceMatcher
 from pathlib import Path
+import re
 from typing import TypeVar
 
 
@@ -22,13 +24,25 @@ class GroupMemoryDatabase:
     changing the current identity model.
     """
 
-    SCHEMA_VERSION = 3
+    SCHEMA_VERSION = 4
     BUSY_TIMEOUT_MS = 1_000
     WRITE_RETRY_ATTEMPTS = 3
     WRITE_RETRY_DELAY_SECONDS = 0.05
     MILLISECONDS_TIMESTAMP_THRESHOLD = 100_000_000_000
     DEFAULT_WEBUI_MEMBER_LIMIT = 100
     MAX_WEBUI_MEMBER_LIMIT = 500
+    MAX_RELATION_EVENT_LIMIT = 200
+    ALIAS_TYPES = {"nickname", "group_note", "manual", "historical", "mention"}
+    TAG_LAYERS = {"confirmed", "observed", "reported", "manual"}
+    EVENT_TYPES = {
+        "mention",
+        "evaluation",
+        "praise",
+        "complaint",
+        "reported",
+        "confirmation",
+    }
+    EVENT_SOURCE_TYPES = {"manual", "observed", "reported"}
 
     def __init__(self, database_path: Path) -> None:
         self.database_path = database_path
@@ -300,6 +314,266 @@ class GroupMemoryDatabase:
             )
         )
 
+    def list_member_aliases(
+        self,
+        *,
+        platform_id: str,
+        external_group_id: str,
+        external_user_id: str,
+    ) -> list[dict[str, object]]:
+        """List aliases for a member's canonical identity in one group."""
+        return self._run_with_retry(
+            lambda connection: self._list_member_aliases_for_identity(
+                connection,
+                platform_id=self._require_identifier("platform_id", platform_id),
+                external_group_id=self._require_identifier(
+                    "external_group_id", external_group_id
+                ),
+                external_user_id=self._require_identifier(
+                    "external_user_id", external_user_id
+                ),
+            )
+        )
+
+    def add_member_alias(
+        self,
+        *,
+        platform_id: str,
+        external_group_id: str,
+        external_user_id: str,
+        alias: str,
+        alias_type: str = "manual",
+        confidence: float = 1.0,
+    ) -> None:
+        """Attach a manually verified alias to a group member identity."""
+        self._run_with_retry(
+            lambda connection: self._add_member_alias_in_transaction(
+                connection,
+                platform_id=self._require_identifier("platform_id", platform_id),
+                external_group_id=self._require_identifier(
+                    "external_group_id", external_group_id
+                ),
+                external_user_id=self._require_identifier(
+                    "external_user_id", external_user_id
+                ),
+                alias=self._require_identifier("alias", alias),
+                alias_type=self._validate_choice(
+                    "alias_type", alias_type, self.ALIAS_TYPES
+                ),
+                confidence=self._normalize_confidence(confidence),
+            )
+        )
+
+    def remove_member_alias(
+        self,
+        *,
+        platform_id: str,
+        external_group_id: str,
+        external_user_id: str,
+        alias_id: int,
+    ) -> bool:
+        """Remove one alias owned by the member's canonical identity."""
+        return self._run_with_retry(
+            lambda connection: self._remove_member_alias_in_transaction(
+                connection,
+                platform_id=self._require_identifier("platform_id", platform_id),
+                external_group_id=self._require_identifier(
+                    "external_group_id", external_group_id
+                ),
+                external_user_id=self._require_identifier(
+                    "external_user_id", external_user_id
+                ),
+                alias_id=self._require_positive_int("alias_id", alias_id),
+            )
+        )
+
+    def resolve_member_reference(
+        self,
+        *,
+        platform_id: str,
+        external_group_id: str,
+        reference: str,
+    ) -> dict[str, object]:
+        """Resolve an ID, alias, or fuzzy name without guessing ambiguous matches.
+
+        The return value always includes a confidence score and candidate list.
+        ``member`` is only present when one canonical identity is unambiguous.
+        """
+        return self._run_with_retry(
+            lambda connection: self._resolve_member_reference(
+                connection,
+                platform_id=self._require_identifier("platform_id", platform_id),
+                external_group_id=self._require_identifier(
+                    "external_group_id", external_group_id
+                ),
+                reference=self._require_identifier("reference", reference),
+            )
+        )
+
+    def merge_members(
+        self,
+        *,
+        platform_id: str,
+        external_group_id: str,
+        source_external_user_id: str,
+        target_external_user_id: str,
+        reason: str = "",
+    ) -> None:
+        """Redirect one group member identity to another, retaining all history."""
+        self._run_with_retry(
+            lambda connection: self._merge_members_in_transaction(
+                connection,
+                platform_id=self._require_identifier("platform_id", platform_id),
+                external_group_id=self._require_identifier(
+                    "external_group_id", external_group_id
+                ),
+                source_external_user_id=self._require_identifier(
+                    "source_external_user_id", source_external_user_id
+                ),
+                target_external_user_id=self._require_identifier(
+                    "target_external_user_id", target_external_user_id
+                ),
+                reason=self._optional_text(reason) or "",
+            )
+        )
+
+    def list_layered_tags(
+        self,
+        *,
+        platform_id: str,
+        external_group_id: str,
+        external_user_id: str,
+    ) -> list[dict[str, object]]:
+        """List v4 layered tags plus legacy manual tags for one member."""
+        return self._run_with_retry(
+            lambda connection: self._list_layered_tags_for_identity(
+                connection,
+                platform_id=self._require_identifier("platform_id", platform_id),
+                external_group_id=self._require_identifier(
+                    "external_group_id", external_group_id
+                ),
+                external_user_id=self._require_identifier(
+                    "external_user_id", external_user_id
+                ),
+            )
+        )
+
+    def add_layered_tag(
+        self,
+        *,
+        platform_id: str,
+        external_group_id: str,
+        external_user_id: str,
+        tag_name: str,
+        layer: str = "manual",
+        confidence: float = 1.0,
+        source_type: str = "manual",
+    ) -> None:
+        """Add or update a layered tag; this never promotes a fact implicitly."""
+        self._run_with_retry(
+            lambda connection: self._add_layered_tag_in_transaction(
+                connection,
+                platform_id=self._require_identifier("platform_id", platform_id),
+                external_group_id=self._require_identifier(
+                    "external_group_id", external_group_id
+                ),
+                external_user_id=self._require_identifier(
+                    "external_user_id", external_user_id
+                ),
+                tag_name=self._require_identifier("tag_name", tag_name),
+                layer=self._validate_choice("layer", layer, self.TAG_LAYERS),
+                confidence=self._normalize_confidence(confidence),
+                source_type=self._validate_choice(
+                    "source_type", source_type, self.EVENT_SOURCE_TYPES
+                ),
+            )
+        )
+
+    def remove_layered_tag(
+        self,
+        *,
+        platform_id: str,
+        external_group_id: str,
+        external_user_id: str,
+        tag_id: int,
+    ) -> bool:
+        """Remove one v4 layered tag record by its stable record ID."""
+        return self._run_with_retry(
+            lambda connection: self._remove_layered_tag_in_transaction(
+                connection,
+                platform_id=self._require_identifier("platform_id", platform_id),
+                external_group_id=self._require_identifier(
+                    "external_group_id", external_group_id
+                ),
+                external_user_id=self._require_identifier(
+                    "external_user_id", external_user_id
+                ),
+                tag_id=self._require_positive_int("tag_id", tag_id),
+            )
+        )
+
+    def list_relationship_events(
+        self,
+        *,
+        platform_id: str,
+        external_group_id: str,
+        external_user_id: str | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, object]]:
+        """List relation events for one group or a selected member identity."""
+        return self._run_with_retry(
+            lambda connection: self._list_relationship_events(
+                connection,
+                platform_id=self._require_identifier("platform_id", platform_id),
+                external_group_id=self._require_identifier(
+                    "external_group_id", external_group_id
+                ),
+                external_user_id=self._optional_text(external_user_id),
+                limit=self._normalize_limit(
+                    limit, default=50, maximum=self.MAX_RELATION_EVENT_LIMIT
+                ),
+            )
+        )
+
+    def add_relationship_event(
+        self,
+        *,
+        platform_id: str,
+        external_group_id: str,
+        source_external_user_id: str,
+        target_external_user_id: str | None,
+        event_type: str,
+        content: str,
+        confidence: float,
+        source_type: str,
+        event_timestamp: int | None = None,
+    ) -> None:
+        """Append an immutable relation event; it does not alter final relations."""
+        self._run_with_retry(
+            lambda connection: self._add_relationship_event_in_transaction(
+                connection,
+                platform_id=self._require_identifier("platform_id", platform_id),
+                external_group_id=self._require_identifier(
+                    "external_group_id", external_group_id
+                ),
+                source_external_user_id=self._require_identifier(
+                    "source_external_user_id", source_external_user_id
+                ),
+                target_external_user_id=self._optional_text(target_external_user_id),
+                event_type=self._validate_choice(
+                    "event_type", event_type, self.EVENT_TYPES
+                ),
+                content=self._require_identifier("content", content),
+                confidence=self._normalize_confidence(confidence),
+                source_type=self._validate_choice(
+                    "source_type", source_type, self.EVENT_SOURCE_TYPES
+                ),
+                event_timestamp=self._require_timestamp(
+                    int(time.time()) if event_timestamp is None else event_timestamp
+                ),
+            )
+        )
+
     def _initialize_connection(self, connection: sqlite3.Connection) -> None:
         self._create_metadata_table(connection)
         schema_version = self._get_schema_version(connection)
@@ -312,9 +586,12 @@ class GroupMemoryDatabase:
         # labelled v2/v3 when a table or index was removed outside the plugin.
         self._ensure_version_2_schema(connection)
         self._ensure_version_3_schema(connection)
+        self._ensure_version_4_schema(connection)
         self._backfill_profiles(connection)
+        self._backfill_members(connection)
         self._validate_version_2_schema(connection)
         self._validate_version_3_schema(connection)
+        self._validate_version_4_schema(connection)
 
         if schema_version < self.SCHEMA_VERSION:
             self._set_schema_version(connection, self.SCHEMA_VERSION)
@@ -366,6 +643,22 @@ class GroupMemoryDatabase:
             """,
             (user_id,),
         )
+        member_id = self._ensure_member(
+            connection,
+            group_id=group_id,
+            user_id=user_id,
+            canonical_name=user_nickname,
+        )
+        canonical_member_id = self._canonical_member_id(connection, member_id)
+        if user_nickname:
+            self._upsert_member_alias(
+                connection,
+                member_id=canonical_member_id,
+                alias=user_nickname,
+                alias_type="nickname",
+                confidence=1.0,
+                source_type="observed",
+            )
         cursor = connection.execute(
             """
             INSERT INTO "messages" (
@@ -382,6 +675,14 @@ class GroupMemoryDatabase:
                 content,
                 message_timestamp,
             ),
+        )
+        self._record_observed_mentions(
+            connection,
+            group_id=group_id,
+            source_member_id=canonical_member_id,
+            message_id=int(cursor.lastrowid),
+            content=content,
+            event_timestamp=message_timestamp,
         )
         return cursor.rowcount == 1
 
@@ -598,6 +899,17 @@ class GroupMemoryDatabase:
         external_group_id: str,
         external_user_id: str,
     ) -> dict[str, object] | None:
+        try:
+            group_id, _, member_id = self._member_context(
+                connection,
+                platform_id=platform_id,
+                external_group_id=external_group_id,
+                external_user_id=external_user_id,
+            )
+        except ValueError:
+            return None
+        canonical_identity = self._member_public_identity(connection, member_id)
+        external_user_id = str(canonical_identity["user_id"])
         row = connection.execute(
             """
             SELECT
@@ -608,31 +920,25 @@ class GroupMemoryDatabase:
                 u.external_user_id,
                 u.nickname,
                 p.summary,
-                COUNT(m.id) AS message_count,
-                MAX(m.message_timestamp) AS last_message_timestamp,
                 n.content AS note
             FROM "groups" AS g
             JOIN "users" AS u
               ON u.platform_id = g.platform_id
              AND u.external_user_id = ?
             LEFT JOIN "profiles" AS p ON p.user_id = u.id
-            LEFT JOIN "messages" AS m ON m.group_id = g.id AND m.user_id = u.id
             LEFT JOIN "notes" AS n ON n.group_id = g.id AND n.user_id = u.id
             WHERE g.platform_id = ?
               AND g.external_group_id = ?
-              AND EXISTS (
-                  SELECT 1
-                  FROM "messages" AS member_message
-                  WHERE member_message.group_id = g.id
-                    AND member_message.user_id = u.id
-              )
-            GROUP BY u.id, g.id
             """,
             (external_user_id, platform_id, external_group_id),
         ).fetchone()
         if row is None:
             return None
+        message_count, last_message_timestamp = self._member_message_stats(
+            connection, group_id=group_id, canonical_member_id=member_id
+        )
         return {
+            "member_id": member_id,
             "platform_id": str(row[0]),
             "platform_name": row[1] or "",
             "group_id": str(row[2]),
@@ -642,14 +948,33 @@ class GroupMemoryDatabase:
             "external_user_id": str(row[4]),
             "nickname": row[5] or "",
             "summary": row[6] or "",
-            "message_count": int(row[7] or 0),
-            "last_message_timestamp": row[8],
-            "note": row[9] or "",
+            "message_count": message_count,
+            "last_message_timestamp": last_message_timestamp,
+            "note": row[7] or "",
             "tags": self._list_tags(
                 connection,
                 platform_id=platform_id,
                 external_group_id=external_group_id,
                 external_user_id=external_user_id,
+            ),
+            "layered_tags": self._list_layered_tags_for_identity(
+                connection,
+                platform_id=platform_id,
+                external_group_id=external_group_id,
+                external_user_id=external_user_id,
+            ),
+            "aliases": self._list_member_aliases_for_identity(
+                connection,
+                platform_id=platform_id,
+                external_group_id=external_group_id,
+                external_user_id=external_user_id,
+            ),
+            "relationship_events": self._list_relationship_events(
+                connection,
+                platform_id=platform_id,
+                external_group_id=external_group_id,
+                external_user_id=external_user_id,
+                limit=50,
             ),
         }
 
@@ -729,59 +1054,825 @@ class GroupMemoryDatabase:
             (key, value),
         )
 
-    @staticmethod
     def _list_member_overview(
-        connection: sqlite3.Connection, *, limit: int
+        self, connection: sqlite3.Connection, *, limit: int
     ) -> list[dict[str, object]]:
         rows = connection.execute(
             """
             SELECT
+                mem.id,
                 g.platform_id,
                 g.platform_name,
                 g.external_group_id,
                 g.group_name,
                 u.external_user_id,
                 u.nickname,
-                COUNT(m.id) AS message_count,
-                MAX(m.message_timestamp) AS last_message_timestamp,
-                n.content AS note,
-                COALESCE((
-                    SELECT GROUP_CONCAT(tag_name, ', ')
-                    FROM (
-                        SELECT t.name AS tag_name
-                        FROM "user_tags" AS ut
-                        JOIN "tags" AS t ON t.id = ut.tag_id
-                        WHERE ut.group_id = g.id AND ut.user_id = u.id
-                        ORDER BY t.name COLLATE NOCASE
-                    )
-                ), '') AS tags
-            FROM "messages" AS m
+                n.content AS note
+            FROM "members" AS mem
+            JOIN "groups" AS g ON g.id = mem.group_id
+            JOIN "users" AS u ON u.id = mem.user_id
+            LEFT JOIN "messages" AS m ON m.group_id = g.id AND m.user_id = u.id
+            LEFT JOIN "notes" AS n ON n.group_id = g.id AND n.user_id = u.id
+            WHERE EXISTS (
+                SELECT 1 FROM "messages" AS member_message
+                WHERE member_message.group_id = g.id AND member_message.user_id = u.id
+            )
+            GROUP BY mem.id
+            """,
+        ).fetchall()
+        by_canonical_member: dict[int, dict[str, object]] = {}
+        for row in rows:
+            canonical_member_id = self._canonical_member_id(connection, int(row[0]))
+            existing = by_canonical_member.get(canonical_member_id)
+            if existing is None:
+                canonical_identity = self._member_public_identity(
+                    connection, canonical_member_id
+                )
+                group_id = self._member_group_id(connection, canonical_member_id)
+                message_count, last_message_timestamp = self._member_message_stats(
+                    connection,
+                    group_id=group_id,
+                    canonical_member_id=canonical_member_id,
+                )
+                tags = self._list_tags(
+                    connection,
+                    platform_id=str(row[1]),
+                    external_group_id=str(row[3]),
+                    external_user_id=str(canonical_identity["user_id"]),
+                )
+                by_canonical_member[canonical_member_id] = {
+                    "member_id": canonical_member_id,
+                    "platform_id": str(row[1]),
+                    "platform_name": row[2] or "",
+                    "group_id": str(row[3]),
+                    "external_group_id": str(row[3]),
+                    "group_name": row[4] or "",
+                    "user_id": str(canonical_identity["user_id"]),
+                    "external_user_id": str(canonical_identity["user_id"]),
+                    "nickname": canonical_identity["nickname"] or row[6] or "",
+                    "message_count": message_count,
+                    "last_message_timestamp": last_message_timestamp,
+                    "note": self._get_note(
+                        connection,
+                        platform_id=str(row[1]),
+                        external_group_id=str(row[3]),
+                        external_user_id=str(canonical_identity["user_id"]),
+                    ) or "",
+                    "tags": ", ".join(tags),
+                }
+        return sorted(
+            by_canonical_member.values(),
+            key=lambda member: (
+                int(member["last_message_timestamp"] or 0),
+                int(member["message_count"]),
+            ),
+            reverse=True,
+        )[:limit]
+
+    @staticmethod
+    def _member_group_id(connection: sqlite3.Connection, member_id: int) -> int:
+        row = connection.execute(
+            'SELECT group_id FROM "members" WHERE id = ?', (member_id,)
+        ).fetchone()
+        if row is None:
+            raise ValueError("Member identity does not exist.")
+        return int(row[0])
+
+    @staticmethod
+    def _member_message_stats(
+        connection: sqlite3.Connection,
+        *,
+        group_id: int,
+        canonical_member_id: int,
+    ) -> tuple[int, int | None]:
+        """Aggregate source identities after a merge without rewriting messages."""
+        row = connection.execute(
+            """
+            WITH RECURSIVE descendants(member_id) AS (
+                SELECT ?
+                UNION ALL
+                SELECT m.id
+                FROM "members" AS m
+                JOIN descendants AS d ON m.merged_into_member_id = d.member_id
+            )
+            SELECT COUNT(msg.id), MAX(msg.message_timestamp)
+            FROM "messages" AS msg
+            JOIN "members" AS m
+              ON m.group_id = msg.group_id AND m.user_id = msg.user_id
+            WHERE msg.group_id = ?
+              AND m.id IN descendants
+            """,
+            (canonical_member_id, group_id),
+        ).fetchone()
+        return int(row[0] or 0), row[1]
+
+    def _member_context(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        platform_id: str,
+        external_group_id: str,
+        external_user_id: str,
+        canonical: bool = True,
+    ) -> tuple[int, int, int]:
+        row = connection.execute(
+            """
+            SELECT g.id, u.id, m.id
+            FROM "members" AS m
             JOIN "groups" AS g ON g.id = m.group_id
             JOIN "users" AS u ON u.id = m.user_id
-            LEFT JOIN "notes" AS n ON n.group_id = g.id AND n.user_id = u.id
-            GROUP BY g.id, u.id
-            ORDER BY last_message_timestamp DESC, message_count DESC
-            LIMIT ?
+            WHERE g.platform_id = ?
+              AND g.external_group_id = ?
+              AND u.external_user_id = ?
             """,
-            (limit,),
+            (platform_id, external_group_id, external_user_id),
+        ).fetchone()
+        if row is None:
+            raise ValueError("Target group member has not been recorded yet.")
+        group_id, user_id, member_id = (int(row[0]), int(row[1]), int(row[2]))
+        return group_id, user_id, self._canonical_member_id(connection, member_id) if canonical else member_id
+
+    @staticmethod
+    def _ensure_member(
+        connection: sqlite3.Connection,
+        *,
+        group_id: int,
+        user_id: int,
+        canonical_name: str | None,
+    ) -> int:
+        connection.execute(
+            """
+            INSERT INTO "members" (group_id, user_id, canonical_name)
+            VALUES (?, ?, COALESCE(?, ''))
+            ON CONFLICT(group_id, user_id) DO UPDATE SET
+                canonical_name = CASE
+                    WHEN excluded.canonical_name <> '' THEN excluded.canonical_name
+                    ELSE "members".canonical_name
+                END,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (group_id, user_id, canonical_name),
+        )
+        return int(
+            connection.execute(
+                'SELECT id FROM "members" WHERE group_id = ? AND user_id = ?',
+                (group_id, user_id),
+            ).fetchone()[0]
+        )
+
+    @staticmethod
+    def _canonical_member_id(connection: sqlite3.Connection, member_id: int) -> int:
+        """Follow merge redirects without changing old message or user records."""
+        current = member_id
+        seen: set[int] = set()
+        while current not in seen:
+            seen.add(current)
+            row = connection.execute(
+                'SELECT merged_into_member_id FROM "members" WHERE id = ?', (current,)
+            ).fetchone()
+            if row is None or row[0] is None:
+                return current
+            current = int(row[0])
+        raise ValueError("Member merge history contains a cycle.")
+
+    @staticmethod
+    def _upsert_member_alias(
+        connection: sqlite3.Connection,
+        *,
+        member_id: int,
+        alias: str,
+        alias_type: str,
+        confidence: float,
+        source_type: str,
+    ) -> None:
+        existing = connection.execute(
+            """
+            SELECT id FROM "member_aliases"
+            WHERE member_id = ? AND alias = ? COLLATE NOCASE
+            """,
+            (member_id, alias),
+        ).fetchone()
+        if existing is None:
+            connection.execute(
+                """
+                INSERT INTO "member_aliases" (
+                    member_id, alias, alias_type, confidence, source_type
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (member_id, alias, alias_type, confidence, source_type),
+            )
+            return
+        connection.execute(
+            """
+            UPDATE "member_aliases"
+            SET alias_type = ?, confidence = ?, source_type = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (alias_type, confidence, source_type, int(existing[0])),
+        )
+
+    def _list_member_aliases_for_identity(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        platform_id: str,
+        external_group_id: str,
+        external_user_id: str,
+    ) -> list[dict[str, object]]:
+        _, _, member_id = self._member_context(
+            connection,
+            platform_id=platform_id,
+            external_group_id=external_group_id,
+            external_user_id=external_user_id,
+        )
+        rows = connection.execute(
+            """
+            SELECT id, alias, alias_type, confidence, source_type, created_at, updated_at
+            FROM "member_aliases"
+            WHERE member_id = ?
+            ORDER BY confidence DESC, alias COLLATE NOCASE
+            """,
+            (member_id,),
         ).fetchall()
         return [
             {
-                "platform_id": str(row[0]),
-                "platform_name": row[1] or "",
-                "group_id": str(row[2]),
-                "external_group_id": str(row[2]),
-                "group_name": row[3] or "",
-                "user_id": str(row[4]),
-                "external_user_id": str(row[4]),
-                "nickname": row[5] or "",
-                "message_count": int(row[6] or 0),
-                "last_message_timestamp": row[7],
-                "note": row[8] or "",
-                "tags": row[9] or "",
+                "id": int(row[0]),
+                "alias": str(row[1]),
+                "alias_type": str(row[2]),
+                "confidence": float(row[3]),
+                "source_type": str(row[4]),
+                "created_at": str(row[5]),
+                "updated_at": str(row[6]),
             }
             for row in rows
         ]
+
+    def _add_member_alias_in_transaction(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        platform_id: str,
+        external_group_id: str,
+        external_user_id: str,
+        alias: str,
+        alias_type: str,
+        confidence: float,
+    ) -> None:
+        connection.execute("BEGIN IMMEDIATE")
+        _, _, member_id = self._member_context(
+            connection,
+            platform_id=platform_id,
+            external_group_id=external_group_id,
+            external_user_id=external_user_id,
+        )
+        self._upsert_member_alias(
+            connection,
+            member_id=member_id,
+            alias=alias,
+            alias_type=alias_type,
+            confidence=confidence,
+            source_type="manual",
+        )
+
+    def _remove_member_alias_in_transaction(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        platform_id: str,
+        external_group_id: str,
+        external_user_id: str,
+        alias_id: int,
+    ) -> bool:
+        connection.execute("BEGIN IMMEDIATE")
+        _, _, member_id = self._member_context(
+            connection,
+            platform_id=platform_id,
+            external_group_id=external_group_id,
+            external_user_id=external_user_id,
+        )
+        cursor = connection.execute(
+            'DELETE FROM "member_aliases" WHERE id = ? AND member_id = ?',
+            (alias_id, member_id),
+        )
+        return cursor.rowcount == 1
+
+    def _member_public_identity(
+        self, connection: sqlite3.Connection, member_id: int
+    ) -> dict[str, object]:
+        row = connection.execute(
+            """
+            SELECT m.id, g.platform_id, g.external_group_id, u.external_user_id,
+                   COALESCE(NULLIF(m.canonical_name, ''), u.nickname, '') AS nickname
+            FROM "members" AS m
+            JOIN "groups" AS g ON g.id = m.group_id
+            JOIN "users" AS u ON u.id = m.user_id
+            WHERE m.id = ?
+            """,
+            (member_id,),
+        ).fetchone()
+        if row is None:
+            raise ValueError("Member identity does not exist.")
+        return {
+            "member_id": int(row[0]),
+            "platform_id": str(row[1]),
+            "group_id": str(row[2]),
+            "user_id": str(row[3]),
+            "nickname": row[4] or "",
+        }
+
+    def _resolve_member_reference(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        platform_id: str,
+        external_group_id: str,
+        reference: str,
+    ) -> dict[str, object]:
+        group = connection.execute(
+            'SELECT id FROM "groups" WHERE platform_id = ? AND external_group_id = ?',
+            (platform_id, external_group_id),
+        ).fetchone()
+        if group is None:
+            return {"member": None, "confidence": 0.0, "candidates": []}
+        group_id = int(group[0])
+        normalized = self._normalize_reference(reference)
+        candidates: dict[int, tuple[float, str]] = {}
+        direct_rows = connection.execute(
+            """
+            SELECT m.id FROM "members" AS m
+            JOIN "users" AS u ON u.id = m.user_id
+            WHERE m.group_id = ? AND u.external_user_id = ?
+            """,
+            (group_id, reference),
+        ).fetchall()
+        for row in direct_rows:
+            candidates[self._canonical_member_id(connection, int(row[0]))] = (
+                1.0,
+                "external_user_id",
+            )
+        alias_rows = connection.execute(
+            """
+            SELECT m.id, a.alias
+            FROM "member_aliases" AS a
+            JOIN "members" AS m ON m.id = a.member_id
+            WHERE m.group_id = ?
+            """,
+            (group_id,),
+        ).fetchall()
+        for row in alias_rows:
+            alias_normalized = self._normalize_reference(row[1])
+            if not alias_normalized:
+                continue
+            score = 1.0 if alias_normalized == normalized else SequenceMatcher(
+                None, normalized, alias_normalized
+            ).ratio()
+            if score < 0.72:
+                continue
+            canonical_id = self._canonical_member_id(connection, int(row[0]))
+            previous = candidates.get(canonical_id)
+            if previous is None or score > previous[0]:
+                candidates[canonical_id] = (score, "alias" if score == 1.0 else "fuzzy_alias")
+        ordered = sorted(candidates.items(), key=lambda item: item[1][0], reverse=True)
+        public_candidates = [
+            {**self._member_public_identity(connection, member_id), "confidence": score, "match_type": match_type}
+            for member_id, (score, match_type) in ordered[:10]
+        ]
+        if not ordered:
+            return {"member": None, "confidence": 0.0, "candidates": []}
+        winner_id, (winner_score, winner_type) = ordered[0]
+        ambiguous = len(ordered) > 1 and winner_score - ordered[1][1][0] < 0.05
+        return {
+            "member": None if ambiguous else self._member_public_identity(connection, winner_id),
+            "confidence": winner_score,
+            "match_type": winner_type,
+            "candidates": public_candidates,
+        }
+
+    def _merge_members_in_transaction(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        platform_id: str,
+        external_group_id: str,
+        source_external_user_id: str,
+        target_external_user_id: str,
+        reason: str,
+    ) -> None:
+        connection.execute("BEGIN IMMEDIATE")
+        _, _, source_member_id = self._member_context(
+            connection,
+            platform_id=platform_id,
+            external_group_id=external_group_id,
+            external_user_id=source_external_user_id,
+            canonical=False,
+        )
+        _, _, target_member_id = self._member_context(
+            connection,
+            platform_id=platform_id,
+            external_group_id=external_group_id,
+            external_user_id=target_external_user_id,
+        )
+        if source_member_id == target_member_id:
+            raise ValueError("Source and target already resolve to the same member.")
+        if self._canonical_member_id(connection, source_member_id) != source_member_id:
+            raise ValueError("Source member has already been merged.")
+        aliases = connection.execute(
+            """
+            SELECT alias, alias_type, confidence, source_type
+            FROM "member_aliases" WHERE member_id = ?
+            """,
+            (source_member_id,),
+        ).fetchall()
+        for alias in aliases:
+            self._upsert_member_alias(
+                connection,
+                member_id=target_member_id,
+                alias=str(alias[0]),
+                alias_type="historical",
+                confidence=float(alias[2]),
+                source_type="manual",
+            )
+        source_identity = self._member_public_identity(connection, source_member_id)
+        if source_identity["nickname"]:
+            self._upsert_member_alias(
+                connection,
+                member_id=target_member_id,
+                alias=str(source_identity["nickname"]),
+                alias_type="historical",
+                confidence=1.0,
+                source_type="manual",
+            )
+        connection.execute(
+            """
+            UPDATE "members"
+            SET merged_into_member_id = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (target_member_id, source_member_id),
+        )
+        connection.execute(
+            """
+            INSERT INTO "identity_merge_history" (
+                source_member_id, target_member_id, reason, operator_type
+            ) VALUES (?, ?, ?, 'manual')
+            """,
+            (source_member_id, target_member_id, reason),
+        )
+
+    def _list_layered_tags_for_identity(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        platform_id: str,
+        external_group_id: str,
+        external_user_id: str,
+    ) -> list[dict[str, object]]:
+        group_id, user_id, member_id = self._member_context(
+            connection,
+            platform_id=platform_id,
+            external_group_id=external_group_id,
+            external_user_id=external_user_id,
+        )
+        descendant_member_ids = self._member_descendant_ids(connection, member_id)
+        placeholders = ", ".join("?" for _ in descendant_member_ids)
+        rows = connection.execute(
+            """
+            SELECT mt.id, td.name, mt.layer, mt.confidence, mt.source_type,
+                   mt.created_at, mt.updated_at
+            FROM "member_tags" AS mt
+            JOIN "tag_definitions" AS td ON td.id = mt.tag_definition_id
+            WHERE mt.member_id IN (""" + placeholders + """)
+            ORDER BY td.name COLLATE NOCASE, mt.layer, mt.source_type
+            """,
+            tuple(descendant_member_ids),
+        ).fetchall()
+        layered_tags = [
+            {
+                "id": int(row[0]),
+                "name": str(row[1]),
+                "layer": str(row[2]),
+                "confidence": float(row[3]),
+                "source_type": str(row[4]),
+                "created_at": str(row[5]),
+                "updated_at": str(row[6]),
+            }
+            for row in rows
+        ]
+        # v3 tags are human-entered assignments. Keep them visible as manual
+        # facts without mutating the old tables or pretending they were inferred.
+        legacy_rows = connection.execute(
+            """
+            SELECT t.name, ut.created_at
+            FROM "user_tags" AS ut
+            JOIN "tags" AS t ON t.id = ut.tag_id
+            JOIN "members" AS mem
+              ON mem.group_id = ut.group_id AND mem.user_id = ut.user_id
+            WHERE ut.group_id = ?
+              AND mem.id IN (""" + placeholders + """)
+            ORDER BY t.name COLLATE NOCASE
+            """,
+            (group_id, *descendant_member_ids),
+        ).fetchall()
+        legacy_tags = [
+            {
+                "id": None,
+                "name": str(row[0]),
+                "layer": "manual",
+                "confidence": 1.0,
+                "source_type": "legacy_manual",
+                "created_at": str(row[1]),
+                "updated_at": str(row[1]),
+                "legacy": True,
+            }
+            for row in legacy_rows
+        ]
+        return [*legacy_tags, *layered_tags]
+
+    def _add_layered_tag_in_transaction(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        platform_id: str,
+        external_group_id: str,
+        external_user_id: str,
+        tag_name: str,
+        layer: str,
+        confidence: float,
+        source_type: str,
+    ) -> None:
+        connection.execute("BEGIN IMMEDIATE")
+        _, _, member_id = self._member_context(
+            connection,
+            platform_id=platform_id,
+            external_group_id=external_group_id,
+            external_user_id=external_user_id,
+        )
+        self._insert_or_update_layered_tag(
+            connection,
+            member_id=member_id,
+            tag_name=tag_name,
+            layer=layer,
+            confidence=confidence,
+            source_type=source_type,
+        )
+
+    @staticmethod
+    def _insert_or_update_layered_tag(
+        connection: sqlite3.Connection,
+        *,
+        member_id: int,
+        tag_name: str,
+        layer: str,
+        confidence: float,
+        source_type: str,
+    ) -> None:
+        connection.execute(
+            """
+            INSERT INTO "tag_definitions" (name) VALUES (?)
+            ON CONFLICT(name) DO UPDATE SET updated_at = CURRENT_TIMESTAMP
+            """,
+            (tag_name,),
+        )
+        tag_definition_id = int(
+            connection.execute(
+                'SELECT id FROM "tag_definitions" WHERE name = ? COLLATE NOCASE',
+                (tag_name,),
+            ).fetchone()[0]
+        )
+        connection.execute(
+            """
+            INSERT INTO "member_tags" (
+                member_id, tag_definition_id, layer, confidence, source_type
+            ) VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(member_id, tag_definition_id, layer, source_type) DO UPDATE SET
+                confidence = excluded.confidence,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (member_id, tag_definition_id, layer, confidence, source_type),
+        )
+
+    def _remove_layered_tag_in_transaction(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        platform_id: str,
+        external_group_id: str,
+        external_user_id: str,
+        tag_id: int,
+    ) -> bool:
+        connection.execute("BEGIN IMMEDIATE")
+        _, _, member_id = self._member_context(
+            connection,
+            platform_id=platform_id,
+            external_group_id=external_group_id,
+            external_user_id=external_user_id,
+        )
+        cursor = connection.execute(
+            'DELETE FROM "member_tags" WHERE id = ? AND member_id = ?',
+            (tag_id, member_id),
+        )
+        return cursor.rowcount == 1
+
+    def _list_relationship_events(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        platform_id: str,
+        external_group_id: str,
+        external_user_id: str | None,
+        limit: int,
+    ) -> list[dict[str, object]]:
+        group = connection.execute(
+            'SELECT id FROM "groups" WHERE platform_id = ? AND external_group_id = ?',
+            (platform_id, external_group_id),
+        ).fetchone()
+        if group is None:
+            return []
+        group_id = int(group[0])
+        member_id: int | None = None
+        descendant_member_ids: list[int] = []
+        if external_user_id:
+            _, _, member_id = self._member_context(
+                connection,
+                platform_id=platform_id,
+                external_group_id=external_group_id,
+                external_user_id=external_user_id,
+            )
+            descendant_member_ids = self._member_descendant_ids(
+                connection, member_id
+            )
+        params: list[object] = [group_id]
+        member_filter = ""
+        if member_id is not None:
+            placeholders = ", ".join("?" for _ in descendant_member_ids)
+            member_filter = (
+                f" AND (re.source_member_id IN ({placeholders})"
+                f" OR re.target_member_id IN ({placeholders}))"
+            )
+            params.extend(descendant_member_ids)
+            params.extend(descendant_member_ids)
+        params.append(limit)
+        rows = connection.execute(
+            f"""
+            SELECT re.id, re.event_type, re.content, re.event_timestamp, re.confidence,
+                   re.source_type, re.created_at,
+                   su.external_user_id, COALESCE(NULLIF(sm.canonical_name, ''), su.nickname, ''),
+                   tu.external_user_id, COALESCE(NULLIF(tm.canonical_name, ''), tu.nickname, '')
+            FROM "relationship_events" AS re
+            JOIN "members" AS sm ON sm.id = re.source_member_id
+            JOIN "users" AS su ON su.id = sm.user_id
+            LEFT JOIN "members" AS tm ON tm.id = re.target_member_id
+            LEFT JOIN "users" AS tu ON tu.id = tm.user_id
+            WHERE re.group_id = ? {member_filter}
+            ORDER BY re.event_timestamp DESC, re.id DESC
+            LIMIT ?
+            """,
+            tuple(params),
+        ).fetchall()
+        return [
+            {
+                "id": int(row[0]),
+                "event_type": str(row[1]),
+                "content": str(row[2]),
+                "event_timestamp": int(row[3]),
+                "confidence": float(row[4]),
+                "source_type": str(row[5]),
+                "created_at": str(row[6]),
+                "source_user_id": str(row[7]),
+                "source_nickname": row[8] or "",
+                "target_user_id": row[9] or "",
+                "target_nickname": row[10] or "",
+            }
+            for row in rows
+        ]
+
+    @staticmethod
+    def _member_descendant_ids(
+        connection: sqlite3.Connection, canonical_member_id: int
+    ) -> list[int]:
+        rows = connection.execute(
+            """
+            WITH RECURSIVE descendants(member_id) AS (
+                SELECT ?
+                UNION ALL
+                SELECT m.id
+                FROM "members" AS m
+                JOIN descendants AS d ON m.merged_into_member_id = d.member_id
+            )
+            SELECT member_id FROM descendants
+            """,
+            (canonical_member_id,),
+        ).fetchall()
+        return [int(row[0]) for row in rows]
+
+    def _add_relationship_event_in_transaction(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        platform_id: str,
+        external_group_id: str,
+        source_external_user_id: str,
+        target_external_user_id: str | None,
+        event_type: str,
+        content: str,
+        confidence: float,
+        source_type: str,
+        event_timestamp: int,
+    ) -> None:
+        connection.execute("BEGIN IMMEDIATE")
+        group_id, _, source_member_id = self._member_context(
+            connection,
+            platform_id=platform_id,
+            external_group_id=external_group_id,
+            external_user_id=source_external_user_id,
+        )
+        target_member_id: int | None = None
+        if target_external_user_id:
+            _, _, target_member_id = self._member_context(
+                connection,
+                platform_id=platform_id,
+                external_group_id=external_group_id,
+                external_user_id=target_external_user_id,
+            )
+        connection.execute(
+            """
+            INSERT INTO "relationship_events" (
+                group_id, source_member_id, target_member_id, event_type, content,
+                event_timestamp, confidence, source_type
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                group_id,
+                source_member_id,
+                target_member_id,
+                event_type,
+                content,
+                event_timestamp,
+                confidence,
+                source_type,
+            ),
+        )
+
+    def _record_observed_mentions(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        group_id: int,
+        source_member_id: int,
+        message_id: int,
+        content: str,
+        event_timestamp: int,
+    ) -> None:
+        """Store only unambiguous textual @ mentions as low-risk observations.
+
+        This deliberately does not infer sentiment, rumours or facts. Native
+        adapter mention components can be added later; the conservative text
+        fallback avoids assigning an event when an alias maps to multiple people.
+        """
+        references = set(re.findall(r"@([^\s@,，。.!！?？:：]{1,64})", content))
+        # Common QQ/OneBot textual representations of a native @ mention.
+        references.update(re.findall(r"\[CQ:at,(?:qq|id)=([^,\]]+)", content))
+        references.update(re.findall(r"<@(\d{1,32})>", content))
+        for raw_reference in references:
+            normalized = self._normalize_reference(raw_reference)
+            if not normalized:
+                continue
+            rows = connection.execute(
+                """
+                SELECT m.id
+                FROM "members" AS m
+                JOIN "users" AS u ON u.id = m.user_id
+                WHERE m.group_id = ? AND u.external_user_id = ?
+                UNION
+                SELECT m.id
+                FROM "member_aliases" AS a
+                JOIN "members" AS m ON m.id = a.member_id
+                WHERE m.group_id = ? AND a.alias = ? COLLATE NOCASE
+                """,
+                (group_id, raw_reference.strip(), group_id, raw_reference.strip()),
+            ).fetchall()
+            target_ids = {
+                self._canonical_member_id(connection, int(row[0])) for row in rows
+            }
+            if len(target_ids) != 1:
+                continue
+            target_member_id = target_ids.pop()
+            connection.execute(
+                """
+                INSERT INTO "relationship_events" (
+                    group_id, source_member_id, target_member_id, event_type,
+                    content, message_id, event_timestamp, confidence, source_type
+                ) VALUES (?, ?, ?, 'mention', ?, ?, ?, 1.0, 'observed')
+                """,
+                (
+                    group_id,
+                    source_member_id,
+                    target_member_id,
+                    content,
+                    message_id,
+                    event_timestamp,
+                ),
+            )
 
     @staticmethod
     def _find_member_ids(
@@ -1090,12 +2181,191 @@ class GroupMemoryDatabase:
         )
 
     @staticmethod
+    def _ensure_version_4_schema(connection: sqlite3.Connection) -> None:
+        """Create v4 identity, evidence and layered-tag tables idempotently."""
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS "members" (
+                id INTEGER PRIMARY KEY,
+                group_id INTEGER NOT NULL REFERENCES "groups"(id),
+                user_id INTEGER NOT NULL REFERENCES "users"(id),
+                canonical_name TEXT NOT NULL DEFAULT '',
+                merged_into_member_id INTEGER REFERENCES "members"(id),
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(group_id, user_id)
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_members_group_user
+            ON "members" (group_id, user_id)
+            """
+        )
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_members_merged_into
+            ON "members" (merged_into_member_id)
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS "member_aliases" (
+                id INTEGER PRIMARY KEY,
+                member_id INTEGER NOT NULL REFERENCES "members"(id),
+                alias TEXT NOT NULL,
+                alias_type TEXT NOT NULL,
+                confidence REAL NOT NULL,
+                source_type TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                CHECK(confidence >= 0.0 AND confidence <= 1.0)
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_member_aliases_member_alias
+            ON "member_aliases" (member_id, alias COLLATE NOCASE)
+            """
+        )
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_member_aliases_alias
+            ON "member_aliases" (alias COLLATE NOCASE)
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS "identity_merge_history" (
+                id INTEGER PRIMARY KEY,
+                source_member_id INTEGER NOT NULL REFERENCES "members"(id),
+                target_member_id INTEGER NOT NULL REFERENCES "members"(id),
+                reason TEXT NOT NULL DEFAULT '',
+                operator_type TEXT NOT NULL DEFAULT 'manual',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_identity_merge_history_source
+            ON "identity_merge_history" (source_member_id, id DESC)
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS "tag_definitions" (
+                id INTEGER PRIMARY KEY,
+                name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_tag_definitions_name
+            ON "tag_definitions" (name COLLATE NOCASE)
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS "member_tags" (
+                id INTEGER PRIMARY KEY,
+                member_id INTEGER NOT NULL REFERENCES "members"(id),
+                tag_definition_id INTEGER NOT NULL REFERENCES "tag_definitions"(id),
+                layer TEXT NOT NULL,
+                confidence REAL NOT NULL,
+                source_type TEXT NOT NULL,
+                evidence_event_id INTEGER REFERENCES "relationship_events"(id),
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                CHECK(confidence >= 0.0 AND confidence <= 1.0),
+                UNIQUE(member_id, tag_definition_id, layer, source_type)
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_member_tags_identity
+            ON "member_tags" (member_id, tag_definition_id, layer, source_type)
+            """
+        )
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_member_tags_member
+            ON "member_tags" (member_id, layer)
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS "relationship_events" (
+                id INTEGER PRIMARY KEY,
+                group_id INTEGER NOT NULL REFERENCES "groups"(id),
+                source_member_id INTEGER NOT NULL REFERENCES "members"(id),
+                target_member_id INTEGER REFERENCES "members"(id),
+                event_type TEXT NOT NULL,
+                content TEXT NOT NULL,
+                message_id INTEGER REFERENCES "messages"(id),
+                event_timestamp INTEGER NOT NULL,
+                confidence REAL NOT NULL,
+                source_type TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                CHECK(confidence >= 0.0 AND confidence <= 1.0)
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_relationship_events_group_time
+            ON "relationship_events" (group_id, event_timestamp DESC)
+            """
+        )
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_relationship_events_source_time
+            ON "relationship_events" (source_member_id, event_timestamp DESC)
+            """
+        )
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_relationship_events_target_time
+            ON "relationship_events" (target_member_id, event_timestamp DESC)
+            """
+        )
+
+    @staticmethod
     def _backfill_profiles(connection: sqlite3.Connection) -> None:
         """Give users from v2 databases an empty, extension-ready profile."""
         connection.execute(
             """
             INSERT OR IGNORE INTO "profiles" (user_id)
             SELECT id FROM "users"
+            """
+        )
+
+    @staticmethod
+    def _backfill_members(connection: sqlite3.Connection) -> None:
+        """Create a group-scoped identity for every previously recorded sender."""
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO "members" (group_id, user_id, canonical_name)
+            SELECT DISTINCT m.group_id, m.user_id, COALESCE(u.nickname, '')
+            FROM "messages" AS m
+            JOIN "users" AS u ON u.id = m.user_id
+            """
+        )
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO "member_aliases" (
+                member_id, alias, alias_type, confidence, source_type
+            )
+            SELECT mem.id, u.nickname, 'nickname', 1.0, 'observed'
+            FROM "members" AS mem
+            JOIN "users" AS u ON u.id = mem.user_id
+            WHERE TRIM(COALESCE(u.nickname, '')) <> ''
             """
         )
 
@@ -1235,6 +2505,102 @@ class GroupMemoryDatabase:
                     f"Database {table_name} table is missing its unique identity key."
                 )
 
+    @classmethod
+    def _validate_version_4_schema(cls, connection: sqlite3.Connection) -> None:
+        cls._validate_required_columns(
+            connection,
+            {
+                "members": {
+                    "id", "group_id", "user_id", "canonical_name",
+                    "merged_into_member_id", "created_at", "updated_at",
+                },
+                "member_aliases": {
+                    "id", "member_id", "alias", "alias_type", "confidence",
+                    "source_type", "created_at", "updated_at",
+                },
+                "identity_merge_history": {
+                    "id", "source_member_id", "target_member_id", "reason",
+                    "operator_type", "created_at",
+                },
+                "tag_definitions": {"id", "name", "created_at", "updated_at"},
+                "member_tags": {
+                    "id", "member_id", "tag_definition_id", "layer", "confidence",
+                    "source_type", "evidence_event_id", "created_at", "updated_at",
+                },
+                "relationship_events": {
+                    "id", "group_id", "source_member_id", "target_member_id",
+                    "event_type", "content", "message_id", "event_timestamp",
+                    "confidence", "source_type", "created_at",
+                },
+            },
+        )
+        cls._validate_foreign_keys(
+            connection,
+            "members",
+            {
+                ("group_id", "groups", "id"),
+                ("user_id", "users", "id"),
+                ("merged_into_member_id", "members", "id"),
+            },
+        )
+        cls._validate_foreign_keys(
+            connection, "member_aliases", {("member_id", "members", "id")}
+        )
+        cls._validate_foreign_keys(
+            connection,
+            "identity_merge_history",
+            {
+                ("source_member_id", "members", "id"),
+                ("target_member_id", "members", "id"),
+            },
+        )
+        cls._validate_foreign_keys(
+            connection,
+            "member_tags",
+            {
+                ("member_id", "members", "id"),
+                ("tag_definition_id", "tag_definitions", "id"),
+                ("evidence_event_id", "relationship_events", "id"),
+            },
+        )
+        cls._validate_foreign_keys(
+            connection,
+            "relationship_events",
+            {
+                ("group_id", "groups", "id"),
+                ("source_member_id", "members", "id"),
+                ("target_member_id", "members", "id"),
+                ("message_id", "messages", "id"),
+            },
+        )
+        for table_name, columns in {
+            "members": ("group_id", "user_id"),
+            "member_aliases": ("member_id", "alias"),
+            "tag_definitions": ("name",),
+            "member_tags": ("member_id", "tag_definition_id", "layer", "source_type"),
+        }.items():
+            if not cls._has_unique_index(connection, table_name, columns):
+                raise ValueError(
+                    f"Database {table_name} table is missing its unique identity key."
+                )
+        cls._validate_named_indexes(
+            connection,
+            {
+                "idx_members_merged_into": ("members", ("merged_into_member_id",)),
+                "idx_member_aliases_alias": ("member_aliases", ("alias",)),
+                "idx_member_tags_member": ("member_tags", ("member_id", "layer")),
+                "idx_relationship_events_group_time": (
+                    "relationship_events", ("group_id", "event_timestamp")
+                ),
+                "idx_relationship_events_source_time": (
+                    "relationship_events", ("source_member_id", "event_timestamp")
+                ),
+                "idx_relationship_events_target_time": (
+                    "relationship_events", ("target_member_id", "event_timestamp")
+                ),
+            },
+        )
+
     @staticmethod
     def _validate_required_columns(
         connection: sqlite3.Connection, required_columns: dict[str, set[str]]
@@ -1323,6 +2689,28 @@ class GroupMemoryDatabase:
                 )
 
     @staticmethod
+    def _validate_named_indexes(
+        connection: sqlite3.Connection,
+        expected_indexes: dict[str, tuple[str, tuple[str, ...]]],
+    ) -> None:
+        for index_name, (table_name, expected_columns) in expected_indexes.items():
+            indexes = {
+                row[1] for row in connection.execute(f'PRAGMA index_list("{table_name}")')
+            }
+            actual_columns = (
+                tuple(
+                    row[2]
+                    for row in connection.execute(f'PRAGMA index_info("{index_name}")')
+                )
+                if index_name in indexes
+                else ()
+            )
+            if actual_columns != expected_columns:
+                raise ValueError(
+                    f"Database index {index_name} is missing or incompatible."
+                )
+
+    @staticmethod
     def _optional_text(value: object) -> str | None:
         if value is None:
             return None
@@ -1359,3 +2747,34 @@ class GroupMemoryDatabase:
         except (TypeError, ValueError):
             return default
         return min(max(limit, 1), maximum)
+
+    @staticmethod
+    def _normalize_reference(value: object) -> str:
+        return "".join(str(value).strip().casefold().split())
+
+    @staticmethod
+    def _normalize_confidence(value: object) -> float:
+        try:
+            confidence = float(value)
+        except (TypeError, ValueError) as error:
+            raise ValueError("confidence must be a number between 0 and 1") from error
+        if not 0.0 <= confidence <= 1.0:
+            raise ValueError("confidence must be between 0 and 1")
+        return confidence
+
+    @staticmethod
+    def _require_positive_int(field_name: str, value: object) -> int:
+        try:
+            result = int(value)
+        except (TypeError, ValueError) as error:
+            raise ValueError(f"{field_name} must be a positive integer") from error
+        if result <= 0:
+            raise ValueError(f"{field_name} must be a positive integer")
+        return result
+
+    @staticmethod
+    def _validate_choice(field_name: str, value: object, allowed: set[str]) -> str:
+        normalized = str(value).strip().lower()
+        if normalized not in allowed:
+            raise ValueError(f"{field_name} is invalid")
+        return normalized
