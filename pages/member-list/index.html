@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>群成员数据</title>
+    <title>?????</title>
     <link rel="stylesheet" href="./style.css" />
   </head>
   <body>
@@ -11,43 +11,43 @@
       <header class="page-header">
         <div>
           <p class="eyebrow">QQ GROUP MEMORY</p>
-          <h1>群成员数据</h1>
-          <p class="subtitle">展示已发言成员与仅被 @ 提及的基础资料。</p>
+          <h1>?????</h1>
+          <p class="subtitle">?????????? @ ????????</p>
         </div>
-        <button id="refresh-button" class="icon-button" type="button" title="刷新数据" aria-label="刷新数据">
-          <span aria-hidden="true">↻</span>
+        <button id="refresh-button" class="icon-button" type="button" title="????" aria-label="????">
+          <span aria-hidden="true">?</span>
         </button>
       </header>
 
-      <section class="toolbar" aria-label="成员数据筛选">
+      <section class="toolbar" aria-label="??????">
         <label class="search-field">
-          <span>筛选成员</span>
-          <input id="search-input" type="search" placeholder="昵称、QQ号、群号、标签或备注" />
+          <span>????</span>
+          <input id="search-input" type="search" placeholder="???QQ??????????" />
         </label>
-        <p id="summary" class="summary" aria-live="polite">正在加载成员数据…</p>
+        <p id="summary" class="summary" aria-live="polite">?????????</p>
       </section>
 
-      <nav class="view-tabs" aria-label="数据视图">
-        <button id="members-view-button" class="view-tab is-active" type="button">成员列表</button>
-        <button id="network-view-button" class="view-tab" type="button">关系网</button>
+      <nav class="view-tabs" aria-label="????">
+        <button id="members-view-button" class="view-tab is-active" type="button">????</button>
+        <button id="network-view-button" class="view-tab" type="button">???</button>
       </nav>
 
-      <section id="members-view" class="table-region" aria-label="成员列表">
+      <section id="members-view" class="table-region" aria-label="????">
         <div id="empty-state" class="empty-state" hidden>
-          <strong>暂无已记录成员</strong>
-          <p>机器人收到 QQ 群消息后，成员会自动出现在这里。</p>
+          <strong>???????</strong>
+          <p>????? QQ ????????????????</p>
         </div>
         <div class="table-scroll">
           <table id="member-table" hidden>
             <thead>
               <tr>
-                <th>群</th>
-                <th>成员</th>
-                <th>状态</th>
-                <th>消息数</th>
-                <th>最近消息</th>
-                <th>标签</th>
-                <th>备注</th>
+                <th>?</th>
+                <th>??</th>
+                <th>??</th>
+                <th>???</th>
+                <th>????</th>
+                <th>??</th>
+                <th>??</th>
               </tr>
             </thead>
             <tbody id="member-body"></tbody>
@@ -55,51 +55,54 @@
         </div>
       </section>
 
-      <section id="network-view" class="network-view" aria-label="关系网" hidden>
+      <section id="network-view" class="network-view" aria-label="???" hidden>
         <div class="network-toolbar">
           <label class="search-field network-center-search">
-            <span>中心成员</span>
-            <input id="network-center-input" type="search" placeholder="输入昵称、别名或 QQ 号" />
+            <span>????</span>
+            <input id="network-center-input" type="search" placeholder="???????? QQ ?" />
             <div id="network-center-results" class="network-search-results" hidden></div>
           </label>
           <label class="network-control">
-            <span>范围</span>
+            <span>??</span>
             <select id="network-scope-input">
-              <option value="one_hop">当前群一跳</option>
-              <option value="two_hop">当前群两跳</option>
-              <option value="group">整个当前群</option>
+              <option value="one_hop">?????</option>
+              <option value="two_hop">?????</option>
+              <option value="group">?????</option>
             </select>
           </label>
           <label class="network-control">
-            <span>关系类型</span>
+            <span>????</span>
             <select id="network-type-input">
-              <option value="">全部类型</option>
-              <option value="mention">提及</option>
-              <option value="evaluation">评价</option>
-              <option value="praise">夸赞</option>
-              <option value="complaint">抱怨</option>
-              <option value="reported">传闻/转述</option>
-              <option value="confirmation">确认行为</option>
+              <option value="">????</option>
+              <option value="mention">??</option>
+              <option value="evaluation">??</option>
+              <option value="praise">??</option>
+              <option value="complaint">??</option>
+              <option value="reported">??/??</option>
+              <option value="confirmation">????</option>
             </select>
           </label>
           <label class="network-control">
-            <span>事件来源</span>
+            <span>????</span>
             <select id="network-source-input">
-              <option value="">全部来源</option>
-              <option value="observed">机器人观察</option>
-              <option value="manual">人工记录</option>
-              <option value="reported">他人转述</option>
+              <option value="">????</option>
+              <option value="observed">?????</option>
+              <option value="manual">????</option>
+              <option value="reported">????</option>
             </select>
           </label>
-          <button id="network-load-button" class="command-button" type="button">刷新关系网</button>
-          <button id="network-expand-button" class="secondary-button" type="button" hidden>展开更多</button>
+          <button id="network-load-button" class="command-button" type="button">?????</button>
+          <button id="network-expand-button" class="secondary-button" type="button" hidden>????</button>
+          <button id="network-reset-view-button" class="secondary-button" type="button">????</button>
         </div>
-        <p id="network-status" class="network-status" aria-live="polite">请选择一名成员作为关系网中心。</p>
+        <p id="network-status" class="network-status" aria-live="polite">???????????????</p>
         <div class="network-canvas-wrap">
-          <svg id="network-canvas" class="network-canvas" viewBox="0 0 980 620" role="img" aria-label="成员关系网"></svg>
+          <svg id="network-canvas" class="network-canvas" viewBox="0 0 980 620" role="img" aria-label="????????????????????????????"></svg>
+          <p class="network-canvas-hint" aria-hidden="true">???? ? ??????? ? ????????</p>
+          <div id="network-tooltip" class="network-tooltip" role="tooltip" hidden></div>
         </div>
         <aside id="network-empty" class="network-empty">
-          从成员详情点击“查看关系网”，或在上方搜索中心成员。
+          ??????????????????????????
         </aside>
       </section>
     </main>
@@ -109,99 +112,103 @@
         <header class="dialog-header">
           <div>
             <p class="eyebrow">MEMBER PROFILE</p>
-            <h2 id="detail-title">成员详情</h2>
+            <h2 id="detail-title">????</h2>
           </div>
-          <button id="dialog-close" class="icon-button" type="button" title="关闭" aria-label="关闭">×</button>
+          <button id="dialog-close" class="icon-button" type="button" title="??" aria-label="??">?</button>
         </header>
 
         <p id="detail-status" class="dialog-status" aria-live="polite"></p>
         <dl class="detail-grid">
-          <div><dt>QQ号</dt><dd id="detail-user-id">-</dd></div>
-          <div><dt>昵称</dt><dd id="detail-nickname">-</dd></div>
-          <div><dt>成员状态</dt><dd id="detail-member-status">-</dd></div>
-          <div><dt>所属群</dt><dd id="detail-group">-</dd></div>
-          <div><dt>消息数</dt><dd id="detail-message-count">-</dd></div>
-          <div><dt>最近消息</dt><dd id="detail-last-message">-</dd></div>
-          <div><dt>基础画像</dt><dd id="detail-profile">暂无</dd></div>
+          <div><dt>QQ?</dt><dd id="detail-user-id">-</dd></div>
+          <div><dt>??</dt><dd id="detail-nickname">-</dd></div>
+          <div><dt>????</dt><dd id="detail-member-status">-</dd></div>
+          <div><dt>???</dt><dd id="detail-group">-</dd></div>
+          <div><dt>???</dt><dd id="detail-message-count">-</dd></div>
+          <div><dt>????</dt><dd id="detail-last-message">-</dd></div>
+          <div><dt>????</dt><dd id="detail-profile">??</dd></div>
+          <div class="detail-summary-card"><dt>????</dt><dd id="detail-note-summary">??</dd></div>
+          <div class="detail-summary-card"><dt>????</dt><dd id="detail-tags-summary">??</dd></div>
+          <div class="detail-summary-card"><dt>????</dt><dd id="detail-relationship-count">??</dd></div>
+          <div class="detail-summary-card"><dt>????</dt><dd id="detail-recent-interaction">??</dd></div>
         </dl>
 
         <section class="editor-section" aria-labelledby="note-heading">
           <div class="section-heading">
-            <h3 id="note-heading">备注</h3>
-            <button id="save-note-button" class="command-button" type="button">保存备注</button>
+            <h3 id="note-heading">??</h3>
+            <button id="save-note-button" class="command-button" type="button">????</button>
           </div>
-          <textarea id="note-input" rows="3" placeholder="输入当前群内备注"></textarea>
+          <textarea id="note-input" rows="3" placeholder="????????"></textarea>
         </section>
 
         <section class="editor-section" aria-labelledby="tag-heading">
           <div class="section-heading">
-            <h3 id="tag-heading">标签</h3>
+            <h3 id="tag-heading">??</h3>
           </div>
-          <div id="detail-tag-list" class="tag-list" aria-label="成员标签"></div>
+          <div id="detail-tag-list" class="tag-list" aria-label="????"></div>
           <div class="tag-editor">
-            <input id="tag-input" type="text" maxlength="64" placeholder="输入新标签" />
-            <button id="add-tag-button" class="command-button" type="button">添加标签</button>
+            <input id="tag-input" type="text" maxlength="64" placeholder="?????" />
+            <button id="add-tag-button" class="command-button" type="button">????</button>
           </div>
         </section>
 
         <section class="editor-section" aria-labelledby="alias-heading">
           <div class="section-heading">
-            <h3 id="alias-heading">别名与身份</h3>
+            <h3 id="alias-heading">?????</h3>
           </div>
-          <div id="alias-list" class="record-list" aria-label="成员别名"></div>
+          <div id="alias-list" class="record-list" aria-label="????"></div>
           <div class="form-grid compact-grid">
-            <input id="alias-input" type="text" maxlength="64" placeholder="添加常用称呼或历史别名" />
-            <select id="alias-type-input" aria-label="别名类型">
-              <option value="manual">人工确认</option>
-              <option value="historical">历史别名</option>
-              <option value="group_note">群备注</option>
+            <input id="alias-input" type="text" maxlength="64" placeholder="???????????" />
+            <select id="alias-type-input" aria-label="????">
+              <option value="manual">????</option>
+              <option value="historical">????</option>
+              <option value="group_note">???</option>
             </select>
-            <button id="add-alias-button" class="command-button" type="button">添加别名</button>
+            <button id="add-alias-button" class="command-button" type="button">????</button>
           </div>
           <div class="form-grid merge-grid">
-            <input id="merge-target-input" type="text" inputmode="numeric" placeholder="目标成员 QQ 号" />
-            <input id="merge-reason-input" type="text" maxlength="120" placeholder="合并原因（可选）" />
-            <button id="merge-member-button" class="danger-button" type="button">合并到该成员</button>
+            <input id="merge-target-input" type="text" inputmode="numeric" placeholder="???? QQ ?" />
+            <input id="merge-reason-input" type="text" maxlength="120" placeholder="????????" />
+            <button id="merge-member-button" class="danger-button" type="button">??????</button>
           </div>
         </section>
 
         <section class="editor-section" aria-labelledby="layered-tag-heading">
           <div class="section-heading">
-            <h3 id="layered-tag-heading">分层标签</h3>
+            <h3 id="layered-tag-heading">????</h3>
           </div>
-          <div id="layered-tag-list" class="record-list" aria-label="分层标签"></div>
+          <div id="layered-tag-list" class="record-list" aria-label="????"></div>
           <div class="form-grid layered-tag-grid">
-            <input id="layered-tag-input" type="text" maxlength="64" placeholder="标签名称" />
-            <select id="tag-layer-input" aria-label="标签层级">
-              <option value="manual">manual 人工修改</option>
-              <option value="observed">observed 机器人观察</option>
-              <option value="reported">reported 他人转述</option>
-              <option value="confirmed">confirmed 确认事实</option>
+            <input id="layered-tag-input" type="text" maxlength="64" placeholder="????" />
+            <select id="tag-layer-input" aria-label="????">
+              <option value="manual">manual ????</option>
+              <option value="observed">observed ?????</option>
+              <option value="reported">reported ????</option>
+              <option value="confirmed">confirmed ????</option>
             </select>
-            <input id="tag-confidence-input" type="number" min="0" max="1" step="0.05" value="1" aria-label="标签置信度" />
-            <button id="add-layered-tag-button" class="command-button" type="button">添加分层标签</button>
+            <input id="tag-confidence-input" type="number" min="0" max="1" step="0.05" value="1" aria-label="?????" />
+            <button id="add-layered-tag-button" class="command-button" type="button">??????</button>
           </div>
         </section>
 
         <section class="editor-section" aria-labelledby="event-heading">
           <div class="section-heading">
-            <h3 id="event-heading">关系事件</h3>
-            <button id="open-network-button" class="secondary-button" type="button">查看关系网</button>
+            <h3 id="event-heading">????</h3>
+            <button id="open-network-button" class="secondary-button" type="button">?????</button>
           </div>
-          <div id="relationship-event-list" class="record-list event-list" aria-label="关系事件"></div>
+          <div id="relationship-event-list" class="record-list event-list" aria-label="????"></div>
           <div class="form-grid event-grid">
-            <select id="event-type-input" aria-label="事件类型">
-              <option value="mention">提及</option>
-              <option value="evaluation">评价</option>
-              <option value="praise">夸赞</option>
-              <option value="complaint">抱怨</option>
-              <option value="reported">传闻/转述</option>
-              <option value="confirmation">确认行为</option>
+            <select id="event-type-input" aria-label="????">
+              <option value="mention">??</option>
+              <option value="evaluation">??</option>
+              <option value="praise">??</option>
+              <option value="complaint">??</option>
+              <option value="reported">??/??</option>
+              <option value="confirmation">????</option>
             </select>
-            <input id="event-target-input" type="text" inputmode="numeric" placeholder="目标成员 QQ 号（可选）" />
-            <input id="event-confidence-input" type="number" min="0" max="1" step="0.05" value="1" aria-label="事件置信度" />
-            <textarea id="event-content-input" rows="2" maxlength="500" placeholder="记录事件内容与上下文"></textarea>
-            <button id="add-event-button" class="command-button" type="button">记录事件</button>
+            <input id="event-target-input" type="text" inputmode="numeric" placeholder="???? QQ ?????" />
+            <input id="event-confidence-input" type="number" min="0" max="1" step="0.05" value="1" aria-label="?????" />
+            <textarea id="event-content-input" rows="2" maxlength="500" placeholder="??????????"></textarea>
+            <button id="add-event-button" class="command-button" type="button">????</button>
           </div>
         </section>
       </section>
@@ -212,15 +219,15 @@
         <header class="dialog-header">
           <div>
             <p class="eyebrow">RELATIONSHIP EVIDENCE</p>
-            <h2 id="relationship-title">关系详情</h2>
+            <h2 id="relationship-title">????</h2>
           </div>
-          <button id="relationship-close" class="icon-button" type="button" title="关闭" aria-label="关闭">×</button>
+          <button id="relationship-close" class="icon-button" type="button" title="??" aria-label="??">?</button>
         </header>
         <dl id="relationship-summary" class="detail-grid relationship-summary"></dl>
         <section class="editor-section" aria-labelledby="relationship-evidence-heading">
-          <div class="section-heading"><h3 id="relationship-evidence-heading">原始证据</h3></div>
+          <div class="section-heading"><h3 id="relationship-evidence-heading">????</h3></div>
           <div id="relationship-evidence-list" class="record-list event-list"></div>
-          <button id="relationship-more-button" class="secondary-button" type="button" hidden>加载更多证据</button>
+          <button id="relationship-more-button" class="secondary-button" type="button" hidden>??????</button>
         </section>
       </section>
     </dialog>

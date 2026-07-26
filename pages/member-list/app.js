@@ -19,6 +19,10 @@ const detailGroup = document.getElementById("detail-group");
 const detailMessageCount = document.getElementById("detail-message-count");
 const detailLastMessage = document.getElementById("detail-last-message");
 const detailProfile = document.getElementById("detail-profile");
+const detailNoteSummary = document.getElementById("detail-note-summary");
+const detailTagsSummary = document.getElementById("detail-tags-summary");
+const detailRelationshipCount = document.getElementById("detail-relationship-count");
+const detailRecentInteraction = document.getElementById("detail-recent-interaction");
 const noteInput = document.getElementById("note-input");
 const saveNoteButton = document.getElementById("save-note-button");
 const detailTagList = document.getElementById("detail-tag-list");
@@ -50,9 +54,11 @@ const networkTypeInput = document.getElementById("network-type-input");
 const networkSourceInput = document.getElementById("network-source-input");
 const networkLoadButton = document.getElementById("network-load-button");
 const networkExpandButton = document.getElementById("network-expand-button");
+const networkResetViewButton = document.getElementById("network-reset-view-button");
 const networkStatus = document.getElementById("network-status");
 const networkCanvas = document.getElementById("network-canvas");
 const networkEmpty = document.getElementById("network-empty");
+const networkTooltip = document.getElementById("network-tooltip");
 const relationshipDialog = document.getElementById("relationship-dialog");
 const relationshipClose = document.getElementById("relationship-close");
 const relationshipSummary = document.getElementById("relationship-summary");
@@ -67,15 +73,24 @@ let networkExpanded = false;
 let activeAggregate = null;
 let activeAggregateIdentity = null;
 let evidenceCursor = null;
+let networkGraph = null;
+let networkViewport = { scale: 1, x: 0, y: 0 };
+let networkPointerState = null;
+let suppressNetworkNodeClickUntil = 0;
+
+const NETWORK_WIDTH = 980;
+const NETWORK_HEIGHT = 620;
+const NETWORK_MIN_SCALE = 0.55;
+const NETWORK_MAX_SCALE = 2.4;
 
 function text(value, fallback = "") {
   return value === undefined || value === null ? fallback : String(value);
 }
 
 function formatTimestamp(timestamp) {
-  if (!timestamp) return "暂无";
+  if (!timestamp) return "??";
   const date = new Date(Number(timestamp) * 1000);
-  if (Number.isNaN(date.getTime())) return "未知";
+  if (Number.isNaN(date.getTime())) return "??";
   return new Intl.DateTimeFormat("zh-CN", {
     year: "numeric", month: "2-digit", day: "2-digit",
     hour: "2-digit", minute: "2-digit", hour12: false,
@@ -96,32 +111,32 @@ function tagsFor(member) {
 }
 
 function memberStatusLabel(status) {
-  return text(status) === "mentioned_only" ? "仅被提及" : "正常成员";
+  return text(status) === "mentioned_only" ? "????" : "????";
 }
 
 function eventTypeLabel(eventType) {
   const labels = {
-    mention: "提及", evaluation: "评价", praise: "夸赞",
-    complaint: "抱怨", reported: "传闻/转述", confirmation: "确认行为",
+    mention: "??", evaluation: "??", praise: "??",
+    complaint: "??", reported: "??/??", confirmation: "????",
   };
-  return labels[text(eventType)] || text(eventType, "未知事件");
+  return labels[text(eventType)] || text(eventType, "????");
 }
 
 function eventSourceLabel(sourceType) {
-  const labels = { observed: "机器人观察", manual: "人工记录", reported: "他人转述" };
-  return labels[text(sourceType)] || text(sourceType, "未知来源");
+  const labels = { observed: "?????", manual: "????", reported: "????" };
+  return labels[text(sourceType)] || text(sourceType, "????");
 }
 
 function aggregateLabel(aggregate) {
-  const source = aggregate.source?.nickname || aggregate.source?.user_id || "未知成员";
-  const target = aggregate.target?.nickname || aggregate.target?.user_id || "无目标成员";
-  return `${source} → ${target} x${aggregate.count}`;
+  const source = aggregate.source?.nickname || aggregate.source?.user_id || "????";
+  const target = aggregate.target?.nickname || aggregate.target?.user_id || "?????";
+  return `${source} ? ${target} x${aggregate.count}`;
 }
 
 function sourceCountsLabel(sourceCounts) {
   const entries = Object.entries(sourceCounts || {});
-  if (!entries.length) return "暂无来源";
-  return entries.map(([source, count]) => `${eventSourceLabel(source)} ${count}`).join("；");
+  if (!entries.length) return "????";
+  return entries.map(([source, count]) => `${eventSourceLabel(source)} ${count}`).join("?");
 }
 
 function sameMember(left, right) {
@@ -133,8 +148,8 @@ function sameMember(left, right) {
 }
 
 function groupLabel(member) {
-  const groupId = member.group_id || member.external_group_id || "未知群号";
-  return member.group_name ? `${member.group_name} (${groupId})` : `群号 ${groupId}`;
+  const groupId = member.group_id || member.external_group_id || "????";
+  return member.group_name ? `${member.group_name} (${groupId})` : `?? ${groupId}`;
 }
 
 function createTextCell(value, className = "") {
@@ -148,9 +163,9 @@ function createGroupCell(member) {
   const cell = document.createElement("td");
   cell.className = "group-cell";
   const name = document.createElement("strong");
-  name.textContent = member.group_name || "未命名群";
+  name.textContent = member.group_name || "????";
   const id = document.createElement("span");
-  id.textContent = `群号 ${member.group_id || member.external_group_id || "未知"}`;
+  id.textContent = `?? ${member.group_id || member.external_group_id || "??"}`;
   cell.append(name, id);
   return cell;
 }
@@ -160,16 +175,16 @@ function createMemberCell(member) {
   const button = document.createElement("button");
   button.className = "member-link";
   button.type = "button";
-  button.title = `查看 ${member.nickname || member.user_id || member.external_user_id} 的详情`;
+  button.title = `?? ${member.nickname || member.user_id || member.external_user_id} ???`;
   const name = document.createElement("strong");
-  name.textContent = member.nickname || `成员 ${member.user_id || member.external_user_id}`;
+  name.textContent = member.nickname || `?? ${member.user_id || member.external_user_id}`;
   const id = document.createElement("span");
-  id.textContent = `QQ ${member.user_id || member.external_user_id || "未知"}`;
+  id.textContent = `QQ ${member.user_id || member.external_user_id || "??"}`;
   button.append(name);
   if (text(member.member_status) === "mentioned_only") {
     const badge = document.createElement("span");
     badge.className = "member-status-badge mentioned-only";
-    badge.textContent = "仅被提及";
+    badge.textContent = "????";
     button.append(badge);
   }
   button.append(id);
@@ -198,15 +213,15 @@ function render() {
         text(member.member_status) === "mentioned_only" ? "status-cell mentioned-only" : "status-cell"),
       createTextCell(String(member.message_count || 0)),
       createTextCell(formatTimestamp(member.last_message_timestamp)),
-      createTextCell(tagsFor(member).join("、") || "暂无", "tag-cell"),
-      createTextCell(member.note || "暂无", "note-cell"),
+      createTextCell(tagsFor(member).join("?") || "??", "tag-cell"),
+      createTextCell(member.note || "??", "note-cell"),
     );
     body.append(row);
   }
   table.hidden = filtered.length === 0;
   emptyState.hidden = filtered.length !== 0;
   summary.textContent = members.length === 0
-    ? "暂无已记录成员" : `显示 ${filtered.length} / ${members.length} 名成员`;
+    ? "???????" : `?? ${filtered.length} / ${members.length} ???`;
 }
 
 function controls() {
@@ -241,7 +256,7 @@ function recordRow({ title, meta = "", removeTitle, onRemove }) {
     remove.className = "record-remove";
     remove.title = removeTitle;
     remove.setAttribute("aria-label", removeTitle);
-    remove.textContent = "×";
+    remove.textContent = "?";
     remove.addEventListener("click", onRemove);
     row.append(remove);
   }
@@ -252,13 +267,13 @@ function renderAliases(member) {
   aliasList.replaceChildren();
   const aliases = Array.isArray(member.aliases) ? member.aliases : [];
   if (!aliases.length) {
-    aliasList.append(recordRow({ title: "暂无别名", meta: "收到新昵称后会自动记录" }));
+    aliasList.append(recordRow({ title: "????", meta: "???????????" }));
     return;
   }
   aliases.forEach((alias) => aliasList.append(recordRow({
     title: alias.alias,
-    meta: `${alias.alias_type} · ${Math.round(Number(alias.confidence || 0) * 100)}% · ${alias.source_type}`,
-    removeTitle: `删除别名 ${alias.alias}`,
+    meta: `${alias.alias_type} ? ${Math.round(Number(alias.confidence || 0) * 100)}% ? ${alias.source_type}`,
+    removeTitle: `???? ${alias.alias}`,
     onRemove: () => removeAlias(alias.id),
   })));
 }
@@ -267,21 +282,21 @@ function renderLayeredTags(member) {
   layeredTagList.replaceChildren();
   const tags = Array.isArray(member.layered_tags) ? member.layered_tags : [];
   if (!tags.length) {
-    layeredTagList.append(recordRow({ title: "暂无分层标签", meta: "人工标签与机器人观察会明确区分" }));
+    layeredTagList.append(recordRow({ title: "??????", meta: "???????????????" }));
     return;
   }
   tags.forEach((tag) => layeredTagList.append(recordRow({
     title: tag.name,
-    meta: `${tag.layer} · ${Math.round(Number(tag.confidence || 0) * 100)}% · ${tag.source_type}`,
-    removeTitle: `删除标签 ${tag.name}`,
+    meta: `${tag.layer} ? ${Math.round(Number(tag.confidence || 0) * 100)}% ? ${tag.source_type}`,
+    removeTitle: `???? ${tag.name}`,
     onRemove: tag.id ? () => removeLayeredTag(tag.id) : null,
   })));
 }
 
 function eventLabel(event) {
-  const source = event.source_nickname || event.source_user_id || "未知成员";
-  const target = event.target_nickname || event.target_user_id || "无目标成员";
-  return `发起人：${source}；被提及人：${target}`;
+  const source = event.source_nickname || event.source_user_id || "????";
+  const target = event.target_nickname || event.target_user_id || "?????";
+  return `????${source}??????${target}`;
 }
 
 function renderEvents(member) {
@@ -289,13 +304,13 @@ function renderEvents(member) {
   const aggregates = Array.isArray(member.relationship_aggregates)
     ? member.relationship_aggregates : [];
   if (!aggregates.length) {
-    relationshipEventList.append(recordRow({ title: "暂无关系事件", meta: "可人工记录，也会保存唯一明确的 @提及" }));
+    relationshipEventList.append(recordRow({ title: "??????", meta: "??????????????? @??" }));
     return;
   }
   aggregates.forEach((aggregate) => {
     const row = recordRow({
-      title: `${eventTypeLabel(aggregate.event_type)} · ${aggregateLabel(aggregate)}`,
-      meta: `来源：${sourceCountsLabel(aggregate.source_counts)}；首次：${formatTimestamp(aggregate.first_time)}；最近：${formatTimestamp(aggregate.last_time)}；最后证据：${text(aggregate.last_evidence, "暂无")}`,
+      title: `${eventTypeLabel(aggregate.event_type)} ? ${aggregateLabel(aggregate)}`,
+      meta: `???${sourceCountsLabel(aggregate.source_counts)}????${formatTimestamp(aggregate.first_time)}????${formatTimestamp(aggregate.last_time)}??????${text(aggregate.last_evidence, "??")}`,
     });
     row.classList.add("interactive-record");
     row.tabIndex = 0;
@@ -316,7 +331,7 @@ function renderLegacyTags(member) {
   if (!tags.length) {
     const empty = document.createElement("span");
     empty.className = "muted-text";
-    empty.textContent = "暂无标签";
+    empty.textContent = "????";
     detailTagList.append(empty);
     return;
   }
@@ -327,9 +342,9 @@ function renderLegacyTags(member) {
     label.textContent = tagName;
     const remove = document.createElement("button");
     remove.type = "button";
-    remove.title = `删除标签 ${tagName}`;
-    remove.setAttribute("aria-label", `删除标签 ${tagName}`);
-    remove.textContent = "×";
+    remove.title = `???? ${tagName}`;
+    remove.setAttribute("aria-label", `???? ${tagName}`);
+    remove.textContent = "?";
     remove.addEventListener("click", () => removeTag(tagName));
     tag.append(label, remove);
     detailTagList.append(tag);
@@ -337,13 +352,29 @@ function renderLegacyTags(member) {
 }
 
 function renderDetail(member) {
+  const aggregates = Array.isArray(member.relationship_aggregates)
+    ? member.relationship_aggregates : [];
+  const totalInteractions = aggregates.reduce(
+    (total, aggregate) => total + Number(aggregate.count || 0), 0,
+  );
+  const mostRecent = [...aggregates].sort(
+    (left, right) => Number(right.last_time || 0) - Number(left.last_time || 0),
+  )[0];
   detailUserId.textContent = member.user_id || member.external_user_id || "-";
-  detailNickname.textContent = member.nickname || "未获取昵称";
+  detailNickname.textContent = member.nickname || "?????";
   detailMemberStatus.textContent = memberStatusLabel(member.member_status);
   detailGroup.textContent = groupLabel(member);
   detailMessageCount.textContent = String(member.message_count || 0);
   detailLastMessage.textContent = formatTimestamp(member.last_message_timestamp);
-  detailProfile.textContent = member.summary || "暂无";
+  detailProfile.textContent = member.summary || "??";
+  detailNoteSummary.textContent = member.note || "??";
+  detailTagsSummary.textContent = tagsFor(member).join("?") || "??";
+  detailRelationshipCount.textContent = aggregates.length
+    ? `${aggregates.length} ????? ? ${totalInteractions} ???`
+    : "??";
+  detailRecentInteraction.textContent = mostRecent
+    ? `${eventTypeLabel(mostRecent.event_type)} ? ${aggregateLabel(mostRecent)} ? ${formatTimestamp(mostRecent.last_time)}${mostRecent.last_evidence ? ` ? ${text(mostRecent.last_evidence).slice(0, 48)}` : ""}`
+    : "??";
   noteInput.value = member.note || "";
   renderLegacyTags(member);
   renderAliases(member);
@@ -386,7 +417,7 @@ function renderCenterResults() {
   matches.forEach((member) => {
     const button = document.createElement("button");
     button.type = "button";
-    button.textContent = `${member.nickname || "未命名成员"} · QQ ${member.user_id || member.external_user_id}`;
+    button.textContent = `${member.nickname || "?????"} ? QQ ${member.user_id || member.external_user_id}`;
     button.addEventListener("click", () => chooseNetworkCenter(member));
     networkCenterResults.append(button);
   });
@@ -395,13 +426,15 @@ function renderCenterResults() {
 
 async function loadNetwork() {
   if (!networkCenter) {
-    networkStatus.textContent = "请选择一名成员作为关系网中心。";
+    networkStatus.textContent = "???????????????";
     networkEmpty.hidden = false;
     networkCanvas.replaceChildren();
+    networkGraph = null;
+    hideNetworkTooltip();
     return;
   }
   networkLoadButton.disabled = true;
-  networkStatus.textContent = "正在加载关系网…";
+  networkStatus.textContent = "????????";
   try {
     const parameters = {
       ...networkCenter,
@@ -416,8 +449,10 @@ async function loadNetwork() {
   } catch (error) {
     networkData = null;
     networkCanvas.replaceChildren();
+    networkGraph = null;
+    hideNetworkTooltip();
     networkEmpty.hidden = false;
-    networkStatus.textContent = error.message || "读取关系网失败";
+    networkStatus.textContent = error.message || "???????";
   } finally {
     networkLoadButton.disabled = false;
   }
@@ -430,8 +465,8 @@ function svgElement(name, attributes = {}) {
 }
 
 function nodePositions(nodes, centerMemberId) {
-  const width = 980;
-  const height = 620;
+  const width = NETWORK_WIDTH;
+  const height = NETWORK_HEIGHT;
   const center = nodes.find((node) => Number(node.member_id) === Number(centerMemberId));
   const positions = new Map();
   if (center) positions.set(Number(center.member_id), { x: width / 2, y: height / 2 });
@@ -447,73 +482,352 @@ function nodePositions(nodes, centerMemberId) {
   return positions;
 }
 
+function relationshipColor(eventType) {
+  const colors = {
+    mention: "#57d1ff",
+    evaluation: "#ab8cff",
+    praise: "#ffd166",
+    complaint: "#ff7a8a",
+    reported: "#ffad66",
+    confirmation: "#5ee6a8",
+  };
+  return colors[text(eventType)] || "#75dcc8";
+}
+
+function escapeSelectorValue(value) {
+  return String(value).replace(/([\\"'\[\]#.:])/g, "\\$1");
+}
+
+function memberDisplayName(member) {
+  return member?.label || member?.nickname || member?.user_id || member?.external_user_id || "?????";
+}
+
+function edgeMember(edge, role) {
+  const member = edge?.[role];
+  if (member && typeof member === "object") return member;
+  const memberId = role === "source" ? edge?.source_member_id : edge?.target_member_id;
+  return networkGraph?.nodes.find((node) => Number(node.member_id) === Number(memberId)) || null;
+}
+
+function memberRelationshipCount(memberId, edges) {
+  return edges.filter((edge) => Number(edge.source_member_id) === Number(memberId)
+    || Number(edge.target_member_id) === Number(memberId))
+    .reduce((total, edge) => total + Number(edge.count || 0), 0);
+}
+
+function edgeTooltip(edge) {
+  const source = edgeMember(edge, "source");
+  const target = edgeMember(edge, "target");
+  return [
+    `${eventTypeLabel(edge.event_type)} ? x${edge.count || 0}`,
+    `${memberDisplayName(source)} ? ${memberDisplayName(target)}`,
+    `???${formatTimestamp(edge.last_time)}`,
+    `???${sourceCountsLabel(edge.source_counts)}`,
+  ].join("\n");
+}
+
+function nodeTooltip(node, edges) {
+  const identity = node.user_id || node.external_user_id || "??";
+  return [
+    memberDisplayName(node),
+    `QQ?${identity}`,
+    `???${memberStatusLabel(node.member_status)}`,
+    `?????${memberRelationshipCount(node.member_id, edges)} ?`,
+  ].join("\n");
+}
+
+function setNetworkTooltip(content, event) {
+  if (!content) return hideNetworkTooltip();
+  networkTooltip.textContent = content;
+  networkTooltip.hidden = false;
+  positionNetworkTooltip(event);
+}
+
+function positionNetworkTooltip(event) {
+  if (networkTooltip.hidden) return;
+  const container = networkCanvas.parentElement;
+  const bounds = container.getBoundingClientRect();
+  const offsetX = Math.min(Math.max(event.clientX - bounds.left + 14, 12), bounds.width - 230);
+  const offsetY = Math.min(Math.max(event.clientY - bounds.top + 14, 12), bounds.height - 118);
+  networkTooltip.style.left = `${offsetX}px`;
+  networkTooltip.style.top = `${offsetY}px`;
+}
+
+function hideNetworkTooltip() {
+  networkTooltip.hidden = true;
+  networkTooltip.textContent = "";
+}
+
+function updateNetworkViewport() {
+  if (!networkGraph?.viewport) return;
+  networkGraph.viewport.setAttribute(
+    "transform",
+    `translate(${networkViewport.x} ${networkViewport.y}) scale(${networkViewport.scale})`,
+  );
+}
+
+function resetNetworkViewport() {
+  networkViewport = { scale: 1, x: 0, y: 0 };
+  updateNetworkViewport();
+}
+
+function updateEdgeGeometry(edgeId) {
+  if (!networkGraph) return;
+  const edge = networkGraph.edges.find((item) => item.id === edgeId);
+  if (!edge) return;
+  const from = networkGraph.positions.get(Number(edge.source_member_id));
+  const to = networkGraph.positions.get(Number(edge.target_member_id));
+  const element = networkGraph.edgeElements.get(edgeId);
+  if (!from || !to || !element) return;
+  const line = element.querySelector("line");
+  const label = element.querySelector("text");
+  line.setAttribute("x1", from.x);
+  line.setAttribute("y1", from.y);
+  line.setAttribute("x2", to.x);
+  line.setAttribute("y2", to.y);
+  label.setAttribute("x", (from.x + to.x) / 2);
+  label.setAttribute("y", (from.y + to.y) / 2 - 9);
+}
+
+function updateNodeGeometry(memberId) {
+  if (!networkGraph) return;
+  const position = networkGraph.positions.get(Number(memberId));
+  const element = networkGraph.nodeElements.get(Number(memberId));
+  if (!position || !element) return;
+  element.querySelectorAll("circle").forEach((circle) => {
+    circle.setAttribute("cx", position.x);
+    circle.setAttribute("cy", position.y);
+  });
+  const label = element.querySelector("text");
+  label.setAttribute("x", position.x);
+  label.setAttribute("y", position.y + 5);
+  networkGraph.edges.forEach((edge) => {
+    if (Number(edge.source_member_id) === Number(memberId)
+      || Number(edge.target_member_id) === Number(memberId)) {
+      updateEdgeGeometry(edge.id);
+    }
+  });
+}
+
+function setNetworkFocus(memberId = null, edgeId = null) {
+  if (!networkGraph) return;
+  networkGraph.nodeElements.forEach((element, id) => {
+    const connected = !memberId || Number(id) === Number(memberId)
+      || networkGraph.edges.some((edge) => (Number(edge.source_member_id) === Number(memberId)
+        || Number(edge.target_member_id) === Number(memberId))
+        && (Number(edge.source_member_id) === Number(id) || Number(edge.target_member_id) === Number(id)));
+    element.classList.toggle("is-dimmed", Boolean(memberId) && !connected);
+    element.classList.toggle("is-highlighted", Boolean(memberId) && Number(id) === Number(memberId));
+  });
+  networkGraph.edgeElements.forEach((element, id) => {
+    const edge = networkGraph.edges.find((item) => item.id === id);
+    const connected = edgeId ? id === edgeId : !memberId
+      || Number(edge.source_member_id) === Number(memberId)
+      || Number(edge.target_member_id) === Number(memberId);
+    element.classList.toggle("is-dimmed", !connected);
+    element.classList.toggle("is-highlighted", Boolean(edgeId) && id === edgeId);
+  });
+}
+
+function clearNetworkFocus() {
+  setNetworkFocus();
+  if (!networkGraph) return;
+  networkGraph.nodeElements.forEach((element) => {
+    element.classList.remove("is-dimmed", "is-highlighted");
+  });
+  networkGraph.edgeElements.forEach((element) => {
+    element.classList.remove("is-dimmed", "is-highlighted");
+  });
+}
+
+function graphPointFromEvent(event) {
+  const point = networkCanvas.createSVGPoint();
+  point.x = event.clientX;
+  point.y = event.clientY;
+  const matrix = networkCanvas.getScreenCTM();
+  if (!matrix) return { x: 0, y: 0 };
+  return point.matrixTransform(matrix.inverse());
+}
+
+function graphPositionFromEvent(event) {
+  const point = graphPointFromEvent(event);
+  return {
+    x: (point.x - networkViewport.x) / networkViewport.scale,
+    y: (point.y - networkViewport.y) / networkViewport.scale,
+  };
+}
+
+function addNetworkPointerInteractions() {
+  networkCanvas.addEventListener("wheel", (event) => {
+    if (!networkGraph) return;
+    event.preventDefault();
+    const point = graphPointFromEvent(event);
+    const previousScale = networkViewport.scale;
+    const factor = event.deltaY < 0 ? 1.12 : 0.89;
+    const nextScale = Math.min(NETWORK_MAX_SCALE, Math.max(NETWORK_MIN_SCALE, previousScale * factor));
+    if (nextScale === previousScale) return;
+    networkViewport.x = point.x - ((point.x - networkViewport.x) * nextScale / previousScale);
+    networkViewport.y = point.y - ((point.y - networkViewport.y) * nextScale / previousScale);
+    networkViewport.scale = nextScale;
+    updateNetworkViewport();
+  }, { passive: false });
+
+  networkCanvas.addEventListener("pointerdown", (event) => {
+    if (!networkGraph || event.button !== 0) return;
+    const nodeElement = event.target.closest(".network-node");
+    if (!nodeElement && event.target.closest(".network-edge")) return;
+    const point = nodeElement ? graphPositionFromEvent(event) : graphPointFromEvent(event);
+    networkPointerState = nodeElement
+      ? { kind: "node", memberId: Number(nodeElement.dataset.memberId), point, moved: false }
+      : { kind: "pan", point, startX: networkViewport.x, startY: networkViewport.y, moved: false };
+    networkCanvas.setPointerCapture(event.pointerId);
+    networkCanvas.classList.toggle("is-dragging-node", networkPointerState.kind === "node");
+    networkCanvas.classList.toggle("is-panning", networkPointerState.kind === "pan");
+  });
+
+  networkCanvas.addEventListener("pointermove", (event) => {
+    if (!networkPointerState) return;
+    const point = networkPointerState.kind === "node"
+      ? graphPositionFromEvent(event) : graphPointFromEvent(event);
+    const movement = Math.hypot(point.x - networkPointerState.point.x, point.y - networkPointerState.point.y);
+    if (movement > 3) networkPointerState.moved = true;
+    if (networkPointerState.kind === "node") {
+      const position = networkGraph.positions.get(networkPointerState.memberId);
+      position.x = Math.min(NETWORK_WIDTH - 42, Math.max(42, point.x));
+      position.y = Math.min(NETWORK_HEIGHT - 42, Math.max(42, point.y));
+      updateNodeGeometry(networkPointerState.memberId);
+      return;
+    }
+    networkViewport.x = networkPointerState.startX + point.x - networkPointerState.point.x;
+    networkViewport.y = networkPointerState.startY + point.y - networkPointerState.point.y;
+    updateNetworkViewport();
+  });
+
+  networkCanvas.addEventListener("pointerup", (event) => {
+    if (!networkPointerState) return;
+    if (networkPointerState.kind === "node" && networkPointerState.moved) {
+      suppressNetworkNodeClickUntil = Date.now() + 180;
+    }
+    networkPointerState = null;
+    networkCanvas.classList.remove("is-dragging-node", "is-panning");
+    if (networkCanvas.hasPointerCapture(event.pointerId)) networkCanvas.releasePointerCapture(event.pointerId);
+  });
+
+  networkCanvas.addEventListener("pointercancel", () => {
+    networkPointerState = null;
+    networkCanvas.classList.remove("is-dragging-node", "is-panning");
+  });
+}
+
 function renderNetwork(network) {
   const nodes = Array.isArray(network.nodes) ? network.nodes : [];
   const edges = Array.isArray(network.edges) ? network.edges : [];
   networkCanvas.replaceChildren();
+  networkGraph = null;
+  hideNetworkTooltip();
+  resetNetworkViewport();
   networkEmpty.hidden = nodes.length > 0;
   networkExpandButton.hidden = !(network.has_more_nodes || network.has_more_edges) || networkExpanded;
   networkStatus.textContent = nodes.length
-    ? `显示 ${nodes.length} 个成员、${edges.length} 条聚合关系${network.has_more_nodes || network.has_more_edges ? "；可展开更多" : ""}。`
-    : "该范围内暂无带明确目标成员的关系事件。";
+    ? `?? ${nodes.length} ????${edges.length} ?????${network.has_more_nodes || network.has_more_edges ? "??????" : ""}?`
+    : "???????????????????";
   if (!nodes.length) return;
 
   const defs = svgElement("defs");
+  const grid = svgElement("pattern", { id: "relation-grid", width: 32, height: 32, patternUnits: "userSpaceOnUse" });
+  grid.append(svgElement("path", { d: "M 32 0 L 0 0 0 32", class: "network-grid-line" }));
+  const glow = svgElement("filter", { id: "node-glow", x: "-80%", y: "-80%", width: "260%", height: "260%" });
+  glow.append(svgElement("feGaussianBlur", { stdDeviation: 5, result: "blur" }));
+  glow.append(svgElement("feMerge", {}));
+  glow.lastElementChild.append(svgElement("feMergeNode", { in: "blur" }));
+  glow.lastElementChild.append(svgElement("feMergeNode", { in: "SourceGraphic" }));
   const marker = svgElement("marker", { id: "relation-arrow", viewBox: "0 0 10 10", refX: 8, refY: 5, markerWidth: 6, markerHeight: 6, orient: "auto-start-reverse" });
   marker.append(svgElement("path", { d: "M 0 0 L 10 5 L 0 10 z", class: "network-arrow" }));
-  defs.append(marker);
+  defs.append(grid, glow, marker);
   networkCanvas.append(defs);
   const positions = nodePositions(nodes, network.center_member_id);
+  const background = svgElement("rect", { x: 0, y: 0, width: NETWORK_WIDTH, height: NETWORK_HEIGHT, class: "network-svg-background" });
+  const viewport = svgElement("g", { class: "network-viewport" });
+  const edgeLayer = svgElement("g", { class: "network-edge-layer" });
+  const nodeLayer = svgElement("g", { class: "network-node-layer" });
+  viewport.append(edgeLayer, nodeLayer);
+  networkCanvas.append(background, viewport);
+  networkGraph = {
+    nodes, edges, positions, viewport,
+    nodeElements: new Map(), edgeElements: new Map(),
+  };
 
-  edges.forEach((edge) => {
+  edges.forEach((edge, index) => {
+    const edgeId = `${edge.source_member_id}:${edge.target_member_id}:${edge.event_type}:${index}`;
+    edge.id = edgeId;
     const from = positions.get(Number(edge.source_member_id));
     const to = positions.get(Number(edge.target_member_id));
     if (!from || !to) return;
-    const group = svgElement("g", { class: "network-edge", tabindex: 0, role: "button" });
-    const width = Math.min(8, 1.5 + Math.sqrt(Number(edge.count || 1)));
+    const group = svgElement("g", { class: "network-edge", tabindex: 0, role: "button", "data-edge-id": edgeId });
+    const width = Math.min(9, 1.8 + Math.sqrt(Number(edge.count || 1)) * 1.35);
+    const color = relationshipColor(edge.event_type);
     group.append(svgElement("line", {
       x1: from.x, y1: from.y, x2: to.x, y2: to.y,
-      "stroke-width": width, "marker-end": "url(#relation-arrow)",
+      "stroke-width": width, stroke: color, "marker-end": "url(#relation-arrow)",
     }));
-    const label = svgElement("text", { x: (from.x + to.x) / 2, y: (from.y + to.y) / 2 - 7, class: "network-edge-label" });
+    const label = svgElement("text", { x: (from.x + to.x) / 2, y: (from.y + to.y) / 2 - 9, class: "network-edge-label", fill: color });
     label.textContent = `${eventTypeLabel(edge.event_type)} x${edge.count}`;
     group.append(label);
     group.addEventListener("click", () => openAggregate(edge));
+    group.addEventListener("mouseenter", (event) => {
+      setNetworkFocus(null, edgeId);
+      setNetworkTooltip(edgeTooltip(edge), event);
+    });
+    group.addEventListener("mousemove", positionNetworkTooltip);
+    group.addEventListener("mouseleave", () => { clearNetworkFocus(); hideNetworkTooltip(); });
     group.addEventListener("keydown", (event) => {
       if (event.key === "Enter" || event.key === " ") { event.preventDefault(); openAggregate(edge); }
     });
-    networkCanvas.append(group);
+    edgeLayer.append(group);
+    networkGraph.edgeElements.set(edgeId, group);
   });
 
   nodes.forEach((node) => {
     const position = positions.get(Number(node.member_id));
     if (!position) return;
+    const isCenter = Number(node.member_id) === Number(network.center_member_id);
     const group = svgElement("g", {
       class: `network-node ${Number(node.member_id) === Number(network.center_member_id) ? "center" : ""} ${node.member_status === "mentioned_only" ? "mentioned-only" : ""}`,
-      tabindex: 0, role: "button",
+      tabindex: 0, role: "button", "data-member-id": Number(node.member_id),
     });
-    group.append(svgElement("circle", { cx: position.x, cy: position.y, r: Number(node.member_id) === Number(network.center_member_id) ? 36 : 28 }));
+    if (isCenter) group.append(svgElement("circle", { cx: position.x, cy: position.y, r: 51, class: "network-node-halo" }));
+    group.append(svgElement("circle", { cx: position.x, cy: position.y, r: isCenter ? 37 : 29, class: "network-node-core" }));
     const label = svgElement("text", { x: position.x, y: position.y + 5, class: "network-node-label" });
     label.textContent = String(node.label).slice(0, 8);
     group.append(label);
-    group.addEventListener("click", () => openMember(node));
+    group.addEventListener("click", () => {
+      if (Date.now() < suppressNetworkNodeClickUntil) return;
+      openMember(node);
+    });
+    group.addEventListener("mouseenter", (event) => {
+      setNetworkFocus(node.member_id);
+      setNetworkTooltip(nodeTooltip(node, edges), event);
+    });
+    group.addEventListener("mousemove", positionNetworkTooltip);
+    group.addEventListener("mouseleave", () => { clearNetworkFocus(); hideNetworkTooltip(); });
     group.addEventListener("keydown", (event) => {
       if (event.key === "Enter" || event.key === " ") { event.preventDefault(); openMember(node); }
     });
-    networkCanvas.append(group);
+    nodeLayer.append(group);
+    networkGraph.nodeElements.set(Number(node.member_id), group);
   });
 }
 
 function renderAggregateSummary(aggregate) {
   relationshipSummary.replaceChildren();
   const fields = [
-    ["关系", `${aggregate.source?.nickname || aggregate.source?.user_id || "未知成员"} → ${aggregate.target?.nickname || aggregate.target?.user_id || "无目标成员"}`],
-    ["类型", eventTypeLabel(aggregate.event_type)],
-    ["数量", `x${aggregate.count}`],
-    ["首次", formatTimestamp(aggregate.first_time)],
-    ["最近", formatTimestamp(aggregate.last_time)],
-    ["来源", sourceCountsLabel(aggregate.source_counts)],
-    ["最后证据", text(aggregate.last_evidence, "暂无")],
+    ["??", `${aggregate.source?.nickname || aggregate.source?.user_id || "????"} ? ${aggregate.target?.nickname || aggregate.target?.user_id || "?????"}`],
+    ["??", eventTypeLabel(aggregate.event_type)],
+    ["??", `x${aggregate.count}`],
+    ["??", formatTimestamp(aggregate.first_time)],
+    ["??", formatTimestamp(aggregate.last_time)],
+    ["??", sourceCountsLabel(aggregate.source_counts)],
+    ["????", text(aggregate.last_evidence, "??")],
   ];
   fields.forEach(([label, value]) => {
     const item = document.createElement("div");
@@ -548,14 +862,14 @@ async function loadAggregateEvidence(append = false) {
     if (!append) relationshipEvidenceList.replaceChildren();
     const events = Array.isArray(result.events) ? result.events : [];
     events.forEach((event) => relationshipEvidenceList.append(recordRow({
-      title: `${eventTypeLabel(event.event_type)} · ${event.source_nickname || event.source_user_id} → ${event.target_nickname || event.target_user_id || "无目标成员"}`,
-      meta: `来源：${eventSourceLabel(event.source_type)}；时间：${formatTimestamp(event.event_timestamp)}；置信度：${Math.round(Number(event.confidence || 0) * 100)}%；证据：${event.content}`,
+      title: `${eventTypeLabel(event.event_type)} ? ${event.source_nickname || event.source_user_id} ? ${event.target_nickname || event.target_user_id || "?????"}`,
+      meta: `???${eventSourceLabel(event.source_type)}????${formatTimestamp(event.event_timestamp)}?????${Math.round(Number(event.confidence || 0) * 100)}%????${event.content}`,
     })));
-    if (!events.length && !append) relationshipEvidenceList.append(recordRow({ title: "暂无可读取的原始证据" }));
+    if (!events.length && !append) relationshipEvidenceList.append(recordRow({ title: "??????????" }));
     evidenceCursor = result.next_cursor || null;
     relationshipMoreButton.hidden = !evidenceCursor;
   } catch (error) {
-    if (!append) relationshipEvidenceList.replaceChildren(recordRow({ title: "读取原始证据失败", meta: error.message || "请稍后重试" }));
+    if (!append) relationshipEvidenceList.replaceChildren(recordRow({ title: "????????", meta: error.message || "?????" }));
   } finally {
     relationshipMoreButton.disabled = false;
   }
@@ -588,13 +902,13 @@ async function openMember(member) {
   selectedMember = member;
   renderDetail(member);
   if (!dialog.open) dialog.showModal();
-  setDialogBusy(true, "正在读取成员详情…");
+  setDialogBusy(true, "?????????");
   try {
     const result = await requestMemberDetail(member);
     syncMember(result.member);
     detailStatus.textContent = "";
   } catch (error) {
-    detailStatus.textContent = error.message || "读取成员详情失败";
+    detailStatus.textContent = error.message || "????????";
   } finally {
     setDialogBusy(false, detailStatus.textContent);
   }
@@ -614,7 +928,7 @@ async function runMutation(message, operation, successMessage) {
     await operation();
     await refreshSelectedMember(successMessage);
   } catch (error) {
-    detailStatus.textContent = error.message || "保存失败";
+    detailStatus.textContent = error.message || "????";
   } finally {
     setDialogBusy(false, detailStatus.textContent);
   }
@@ -623,56 +937,56 @@ async function runMutation(message, operation, successMessage) {
 function readConfidence(input) {
   const value = Number(input.value);
   if (!Number.isFinite(value) || value < 0 || value > 1) {
-    throw new Error("置信度必须在 0 到 1 之间");
+    throw new Error("?????? 0 ? 1 ??");
   }
   return value;
 }
 
 async function saveNote() {
   const content = noteInput.value.trim();
-  if (!content) return void (detailStatus.textContent = "备注不能为空");
-  await runMutation("正在保存备注…", () => bridge.apiPost("member/note", {
+  if (!content) return void (detailStatus.textContent = "??????");
+  await runMutation("???????", () => bridge.apiPost("member/note", {
     ...memberIdentity(selectedMember), content,
-  }), "备注已保存");
+  }), "?????");
 }
 
 async function addTag() {
   const tagName = tagInput.value.trim();
-  if (!tagName) return void (detailStatus.textContent = "请输入标签");
-  await runMutation("正在添加标签…", async () => {
+  if (!tagName) return void (detailStatus.textContent = "?????");
+  await runMutation("???????", async () => {
     await bridge.apiPost("member/tags/add", { ...memberIdentity(selectedMember), tag_name: tagName });
     tagInput.value = "";
-  }, "标签已添加");
+  }, "?????");
 }
 
 async function removeTag(tagName) {
-  await runMutation("正在删除标签…", () => bridge.apiPost("member/tags/remove", {
+  await runMutation("???????", () => bridge.apiPost("member/tags/remove", {
     ...memberIdentity(selectedMember), tag_name: tagName,
-  }), "标签已删除");
+  }), "?????");
 }
 
 async function addAlias() {
   const alias = aliasInput.value.trim();
-  if (!alias) return void (detailStatus.textContent = "请输入别名");
-  await runMutation("正在添加别名…", async () => {
+  if (!alias) return void (detailStatus.textContent = "?????");
+  await runMutation("???????", async () => {
     await bridge.apiPost("member/aliases/add", {
       ...memberIdentity(selectedMember), alias, alias_type: aliasTypeInput.value, confidence: 1,
     });
     aliasInput.value = "";
-  }, "别名已添加");
+  }, "?????");
 }
 
 async function removeAlias(aliasId) {
-  await runMutation("正在删除别名…", () => bridge.apiPost("member/aliases/remove", {
+  await runMutation("???????", () => bridge.apiPost("member/aliases/remove", {
     ...memberIdentity(selectedMember), alias_id: aliasId,
-  }), "别名已删除");
+  }), "?????");
 }
 
 async function mergeMember() {
   const targetUserId = mergeTargetInput.value.trim();
-  if (!targetUserId) return void (detailStatus.textContent = "请输入目标成员 QQ 号");
-  if (!window.confirm("合并后来源身份会重定向到目标身份，历史消息不会删除。确认继续？")) return;
-  setDialogBusy(true, "正在合并成员身份…");
+  if (!targetUserId) return void (detailStatus.textContent = "??????? QQ ?");
+  if (!window.confirm("???????????????????????????????")) return;
+  setDialogBusy(true, "?????????");
   try {
     await bridge.apiPost("member/merge", {
       ...memberIdentity(selectedMember), target_user_id: targetUserId, reason: mergeReasonInput.value.trim(),
@@ -680,9 +994,9 @@ async function mergeMember() {
     mergeTargetInput.value = "";
     mergeReasonInput.value = "";
     await loadMembers();
-    await refreshSelectedMember("身份已合并，历史消息已归入目标身份");
+    await refreshSelectedMember("?????????????????");
   } catch (error) {
-    detailStatus.textContent = error.message || "合并成员身份失败";
+    detailStatus.textContent = error.message || "????????";
   } finally {
     setDialogBusy(false, detailStatus.textContent);
   }
@@ -690,46 +1004,46 @@ async function mergeMember() {
 
 async function addLayeredTag() {
   const tagName = layeredTagInput.value.trim();
-  if (!tagName) return void (detailStatus.textContent = "请输入分层标签");
+  if (!tagName) return void (detailStatus.textContent = "???????");
   let confidence;
   try { confidence = readConfidence(tagConfidenceInput); }
   catch (error) { detailStatus.textContent = error.message; return; }
-  await runMutation("正在添加分层标签…", async () => {
+  await runMutation("?????????", async () => {
     await bridge.apiPost("member/layered-tags/add", {
       ...memberIdentity(selectedMember), tag_name: tagName, layer: tagLayerInput.value,
       confidence, source_type: "manual",
     });
     layeredTagInput.value = "";
-  }, "分层标签已保存");
+  }, "???????");
 }
 
 async function removeLayeredTag(tagId) {
-  await runMutation("正在删除分层标签…", () => bridge.apiPost("member/layered-tags/remove", {
+  await runMutation("?????????", () => bridge.apiPost("member/layered-tags/remove", {
     ...memberIdentity(selectedMember), tag_id: tagId,
-  }), "分层标签已删除");
+  }), "???????");
 }
 
 async function addRelationshipEvent() {
   const content = eventContentInput.value.trim();
-  if (!content) return void (detailStatus.textContent = "请输入事件内容");
+  if (!content) return void (detailStatus.textContent = "???????");
   let confidence;
   try { confidence = readConfidence(eventConfidenceInput); }
   catch (error) { detailStatus.textContent = error.message; return; }
-  await runMutation("正在记录关系事件…", async () => {
+  await runMutation("?????????", async () => {
     await bridge.apiPost("relationship-events", {
       ...memberIdentity(selectedMember), target_user_id: eventTargetInput.value.trim(),
       event_type: eventTypeInput.value, content, confidence, source_type: "manual",
     });
     eventTargetInput.value = "";
     eventContentInput.value = "";
-  }, "关系事件已记录");
+  }, "???????");
   networkData = null;
   if (!networkView.hidden && networkCenter) loadNetwork();
 }
 
 async function loadMembers() {
   refreshButton.disabled = true;
-  summary.textContent = "正在刷新成员数据…";
+  summary.textContent = "?????????";
   try {
     const result = await bridge.apiGet("members");
     members = Array.isArray(result.members) ? result.members : [];
@@ -738,7 +1052,7 @@ async function loadMembers() {
     members = [];
     table.hidden = true;
     emptyState.hidden = false;
-    summary.textContent = error.message || "读取成员数据失败";
+    summary.textContent = error.message || "????????";
   } finally {
     refreshButton.disabled = false;
   }
@@ -762,6 +1076,7 @@ networkExpandButton.addEventListener("click", () => {
   networkExpanded = true;
   loadNetwork();
 });
+networkResetViewButton.addEventListener("click", resetNetworkViewport);
 networkScopeInput.addEventListener("change", () => { networkExpanded = false; loadNetwork(); });
 networkTypeInput.addEventListener("change", () => { networkExpanded = false; loadNetwork(); });
 networkSourceInput.addEventListener("change", () => { networkExpanded = false; loadNetwork(); });
@@ -786,4 +1101,5 @@ dialog.addEventListener("click", (event) => {
 relationshipDialog.addEventListener("click", (event) => {
   if (event.target === relationshipDialog) relationshipDialog.close();
 });
+addNetworkPointerInteractions();
 loadMembers();
