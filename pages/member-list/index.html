@@ -27,7 +27,12 @@
         <p id="summary" class="summary" aria-live="polite">正在加载成员数据…</p>
       </section>
 
-      <section class="table-region" aria-label="成员列表">
+      <nav class="view-tabs" aria-label="数据视图">
+        <button id="members-view-button" class="view-tab is-active" type="button">成员列表</button>
+        <button id="network-view-button" class="view-tab" type="button">关系网</button>
+      </nav>
+
+      <section id="members-view" class="table-region" aria-label="成员列表">
         <div id="empty-state" class="empty-state" hidden>
           <strong>暂无已记录成员</strong>
           <p>机器人收到 QQ 群消息后，成员会自动出现在这里。</p>
@@ -48,6 +53,54 @@
             <tbody id="member-body"></tbody>
           </table>
         </div>
+      </section>
+
+      <section id="network-view" class="network-view" aria-label="关系网" hidden>
+        <div class="network-toolbar">
+          <label class="search-field network-center-search">
+            <span>中心成员</span>
+            <input id="network-center-input" type="search" placeholder="输入昵称、别名或 QQ 号" />
+            <div id="network-center-results" class="network-search-results" hidden></div>
+          </label>
+          <label class="network-control">
+            <span>范围</span>
+            <select id="network-scope-input">
+              <option value="one_hop">当前群一跳</option>
+              <option value="two_hop">当前群两跳</option>
+              <option value="group">整个当前群</option>
+            </select>
+          </label>
+          <label class="network-control">
+            <span>关系类型</span>
+            <select id="network-type-input">
+              <option value="">全部类型</option>
+              <option value="mention">提及</option>
+              <option value="evaluation">评价</option>
+              <option value="praise">夸赞</option>
+              <option value="complaint">抱怨</option>
+              <option value="reported">传闻/转述</option>
+              <option value="confirmation">确认行为</option>
+            </select>
+          </label>
+          <label class="network-control">
+            <span>事件来源</span>
+            <select id="network-source-input">
+              <option value="">全部来源</option>
+              <option value="observed">机器人观察</option>
+              <option value="manual">人工记录</option>
+              <option value="reported">他人转述</option>
+            </select>
+          </label>
+          <button id="network-load-button" class="command-button" type="button">刷新关系网</button>
+          <button id="network-expand-button" class="secondary-button" type="button" hidden>展开更多</button>
+        </div>
+        <p id="network-status" class="network-status" aria-live="polite">请选择一名成员作为关系网中心。</p>
+        <div class="network-canvas-wrap">
+          <svg id="network-canvas" class="network-canvas" viewBox="0 0 980 620" role="img" aria-label="成员关系网"></svg>
+        </div>
+        <aside id="network-empty" class="network-empty">
+          从成员详情点击“查看关系网”，或在上方搜索中心成员。
+        </aside>
       </section>
     </main>
 
@@ -133,6 +186,7 @@
         <section class="editor-section" aria-labelledby="event-heading">
           <div class="section-heading">
             <h3 id="event-heading">关系事件</h3>
+            <button id="open-network-button" class="secondary-button" type="button">查看关系网</button>
           </div>
           <div id="relationship-event-list" class="record-list event-list" aria-label="关系事件"></div>
           <div class="form-grid event-grid">
@@ -149,6 +203,24 @@
             <textarea id="event-content-input" rows="2" maxlength="500" placeholder="记录事件内容与上下文"></textarea>
             <button id="add-event-button" class="command-button" type="button">记录事件</button>
           </div>
+        </section>
+      </section>
+    </dialog>
+
+    <dialog id="relationship-dialog" class="member-dialog relationship-dialog" aria-labelledby="relationship-title">
+      <section class="dialog-shell">
+        <header class="dialog-header">
+          <div>
+            <p class="eyebrow">RELATIONSHIP EVIDENCE</p>
+            <h2 id="relationship-title">关系详情</h2>
+          </div>
+          <button id="relationship-close" class="icon-button" type="button" title="关闭" aria-label="关闭">×</button>
+        </header>
+        <dl id="relationship-summary" class="detail-grid relationship-summary"></dl>
+        <section class="editor-section" aria-labelledby="relationship-evidence-heading">
+          <div class="section-heading"><h3 id="relationship-evidence-heading">原始证据</h3></div>
+          <div id="relationship-evidence-list" class="record-list event-list"></div>
+          <button id="relationship-more-button" class="secondary-button" type="button" hidden>加载更多证据</button>
         </section>
       </section>
     </dialog>

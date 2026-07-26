@@ -24,7 +24,7 @@ class GroupMemoryDatabase:
     changing the current identity model.
     """
 
-    SCHEMA_VERSION = 5
+    SCHEMA_VERSION = 6
     BUSY_TIMEOUT_MS = 1_000
     WRITE_RETRY_ATTEMPTS = 3
     WRITE_RETRY_DELAY_SECONDS = 0.05
@@ -32,6 +32,14 @@ class GroupMemoryDatabase:
     DEFAULT_WEBUI_MEMBER_LIMIT = 100
     MAX_WEBUI_MEMBER_LIMIT = 500
     MAX_RELATION_EVENT_LIMIT = 200
+    DEFAULT_RELATION_AGGREGATE_LIMIT = 50
+    MAX_RELATION_AGGREGATE_LIMIT = 200
+    DEFAULT_NETWORK_NODE_LIMIT = 30
+    MAX_NETWORK_NODE_LIMIT = 100
+    DEFAULT_NETWORK_EDGE_LIMIT = 50
+    MAX_NETWORK_EDGE_LIMIT = 200
+    DEFAULT_RELATION_EVIDENCE_LIMIT = 50
+    MAX_RELATION_EVIDENCE_LIMIT = 100
     ALIAS_TYPES = {"nickname", "group_note", "manual", "historical", "mention"}
     TAG_LAYERS = {"confirmed", "observed", "reported", "manual"}
     EVENT_TYPES = {
@@ -43,6 +51,7 @@ class GroupMemoryDatabase:
         "confirmation",
     }
     EVENT_SOURCE_TYPES = {"manual", "observed", "reported"}
+    NETWORK_SCOPES = {"one_hop", "two_hop", "group"}
 
     def __init__(self, database_path: Path) -> None:
         self.database_path = database_path
@@ -538,6 +547,133 @@ class GroupMemoryDatabase:
             )
         )
 
+    def list_relationship_aggregates(
+        self,
+        *,
+        platform_id: str,
+        external_group_id: str,
+        external_user_id: str | None = None,
+        limit: int = DEFAULT_RELATION_AGGREGATE_LIMIT,
+        event_types: list[str] | None = None,
+        source_types: list[str] | None = None,
+    ) -> list[dict[str, object]]:
+        """Aggregate immutable relationship evidence for display only."""
+        return self._run_with_retry(
+            lambda connection: self._list_relationship_aggregates(
+                connection,
+                platform_id=self._require_identifier("platform_id", platform_id),
+                external_group_id=self._require_identifier(
+                    "external_group_id", external_group_id
+                ),
+                external_user_id=self._optional_text(external_user_id),
+                limit=self._normalize_limit(
+                    limit,
+                    default=self.DEFAULT_RELATION_AGGREGATE_LIMIT,
+                    maximum=self.MAX_RELATION_AGGREGATE_LIMIT,
+                ),
+                event_types=self._normalize_choices(
+                    event_types, self.EVENT_TYPES
+                ),
+                source_types=self._normalize_choices(
+                    source_types, self.EVENT_SOURCE_TYPES
+                ),
+            )
+        )
+
+    def get_relationship_network(
+        self,
+        *,
+        platform_id: str,
+        external_group_id: str,
+        external_user_id: str,
+        scope: str = "one_hop",
+        node_limit: int = DEFAULT_NETWORK_NODE_LIMIT,
+        edge_limit: int = DEFAULT_NETWORK_EDGE_LIMIT,
+        event_types: list[str] | None = None,
+        source_types: list[str] | None = None,
+    ) -> dict[str, object]:
+        """Return a bounded graph built from aggregated relationship evidence."""
+        return self._run_with_retry(
+            lambda connection: self._get_relationship_network(
+                connection,
+                platform_id=self._require_identifier("platform_id", platform_id),
+                external_group_id=self._require_identifier(
+                    "external_group_id", external_group_id
+                ),
+                external_user_id=self._require_identifier(
+                    "external_user_id", external_user_id
+                ),
+                scope=self._validate_choice("scope", scope, self.NETWORK_SCOPES),
+                node_limit=self._normalize_limit(
+                    node_limit,
+                    default=self.DEFAULT_NETWORK_NODE_LIMIT,
+                    maximum=self.MAX_NETWORK_NODE_LIMIT,
+                ),
+                edge_limit=self._normalize_limit(
+                    edge_limit,
+                    default=self.DEFAULT_NETWORK_EDGE_LIMIT,
+                    maximum=self.MAX_NETWORK_EDGE_LIMIT,
+                ),
+                event_types=self._normalize_choices(
+                    event_types, self.EVENT_TYPES
+                ),
+                source_types=self._normalize_choices(
+                    source_types, self.EVENT_SOURCE_TYPES
+                ),
+            )
+        )
+
+    def list_relationship_aggregate_events(
+        self,
+        *,
+        platform_id: str,
+        external_group_id: str,
+        source_member_id: int,
+        target_member_id: int | None,
+        event_type: str,
+        limit: int = DEFAULT_RELATION_EVIDENCE_LIMIT,
+        before_timestamp: int | None = None,
+        before_id: int | None = None,
+    ) -> dict[str, object]:
+        """Page raw evidence for one canonical aggregate without changing it."""
+        return self._run_with_retry(
+            lambda connection: self._list_relationship_aggregate_events(
+                connection,
+                platform_id=self._require_identifier("platform_id", platform_id),
+                external_group_id=self._require_identifier(
+                    "external_group_id", external_group_id
+                ),
+                source_member_id=self._require_positive_int(
+                    "source_member_id", source_member_id
+                ),
+                target_member_id=(
+                    None
+                    if target_member_id is None
+                    else self._require_positive_int(
+                        "target_member_id", target_member_id
+                    )
+                ),
+                event_type=self._validate_choice(
+                    "event_type", event_type, self.EVENT_TYPES
+                ),
+                limit=self._normalize_limit(
+                    limit,
+                    default=self.DEFAULT_RELATION_EVIDENCE_LIMIT,
+                    maximum=self.MAX_RELATION_EVIDENCE_LIMIT,
+                ),
+                before_timestamp=(
+                    None
+                    if before_timestamp is None
+                    else self._require_timestamp(before_timestamp)
+                ),
+                before_id=(
+                    None
+                    if before_id is None
+                    else self._require_positive_int("before_id", before_id)
+                ),
+            )
+        )
+
     def add_relationship_event(
         self,
         *,
@@ -597,6 +733,7 @@ class GroupMemoryDatabase:
         self._ensure_version_3_schema(connection)
         self._ensure_version_4_schema(connection)
         self._ensure_version_5_schema(connection)
+        self._ensure_version_6_schema(connection)
         self._backfill_profiles(connection)
         self._backfill_members(connection)
         self._backfill_version_5_schema(
@@ -609,6 +746,7 @@ class GroupMemoryDatabase:
         self._validate_version_3_schema(connection)
         self._validate_version_4_schema(connection)
         self._validate_version_5_schema(connection)
+        self._validate_version_6_schema(connection)
 
         if schema_version < self.SCHEMA_VERSION:
             self._set_schema_version(connection, self.SCHEMA_VERSION)
@@ -1011,6 +1149,15 @@ class GroupMemoryDatabase:
                 external_user_id=external_user_id,
                 limit=50,
             ),
+            "relationship_aggregates": self._list_relationship_aggregates(
+                connection,
+                platform_id=platform_id,
+                external_group_id=external_group_id,
+                external_user_id=external_user_id,
+                limit=self.DEFAULT_RELATION_AGGREGATE_LIMIT,
+                event_types=[],
+                source_types=[],
+            ),
         }
 
     def _list_memories(
@@ -1153,6 +1300,15 @@ class GroupMemoryDatabase:
                     "external_user_id": str(canonical_identity["user_id"]),
                     "nickname": canonical_identity["nickname"] or row[6] or "",
                     "member_status": str(canonical_identity["member_status"]),
+                    "aliases": [
+                        str(alias["alias"])
+                        for alias in self._list_member_aliases_for_identity(
+                            connection,
+                            platform_id=str(row[1]),
+                            external_group_id=str(row[3]),
+                            external_user_id=str(canonical_identity["user_id"]),
+                        )
+                    ],
                     "message_count": message_count,
                     "last_message_timestamp": last_message_timestamp,
                     "note": self._get_note(
@@ -1809,6 +1965,334 @@ class GroupMemoryDatabase:
             }
             for row in rows
         ]
+
+    def _list_relationship_aggregates(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        platform_id: str,
+        external_group_id: str,
+        external_user_id: str | None,
+        limit: int,
+        event_types: list[str],
+        source_types: list[str],
+    ) -> list[dict[str, object]]:
+        group_id = self._group_internal_id(
+            connection, platform_id=platform_id, external_group_id=external_group_id
+        )
+        if group_id is None:
+            return []
+        member_id: int | None = None
+        if external_user_id:
+            _, _, member_id = self._member_context(
+                connection,
+                platform_id=platform_id,
+                external_group_id=external_group_id,
+                external_user_id=external_user_id,
+            )
+        aggregates = self._relationship_aggregates_for_group(
+            connection,
+            group_id=group_id,
+            event_types=event_types,
+            source_types=source_types,
+        )
+        if member_id is not None:
+            aggregates = [
+                aggregate
+                for aggregate in aggregates
+                if aggregate["source_member_id"] == member_id
+                or aggregate["target_member_id"] == member_id
+            ]
+        return aggregates[:limit]
+
+    def _get_relationship_network(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        platform_id: str,
+        external_group_id: str,
+        external_user_id: str,
+        scope: str,
+        node_limit: int,
+        edge_limit: int,
+        event_types: list[str],
+        source_types: list[str],
+    ) -> dict[str, object]:
+        group_id, _, center_member_id = self._member_context(
+            connection,
+            platform_id=platform_id,
+            external_group_id=external_group_id,
+            external_user_id=external_user_id,
+        )
+        aggregates = [
+            aggregate
+            for aggregate in self._relationship_aggregates_for_group(
+                connection,
+                group_id=group_id,
+                event_types=event_types,
+                source_types=source_types,
+            )
+            if aggregate["target_member_id"] is not None
+        ]
+        selected_member_ids: set[int]
+        if scope == "group":
+            selected_member_ids = {
+                int(aggregate["source_member_id"])
+                for aggregate in aggregates
+            } | {
+                int(aggregate["target_member_id"])
+                for aggregate in aggregates
+                if aggregate["target_member_id"] is not None
+            }
+            selected_member_ids.add(center_member_id)
+        else:
+            one_hop = {center_member_id}
+            for aggregate in aggregates:
+                if aggregate["source_member_id"] == center_member_id:
+                    one_hop.add(int(aggregate["target_member_id"]))
+                elif aggregate["target_member_id"] == center_member_id:
+                    one_hop.add(int(aggregate["source_member_id"]))
+            selected_member_ids = one_hop
+            if scope == "two_hop":
+                for aggregate in aggregates:
+                    if (
+                        aggregate["source_member_id"] in one_hop
+                        or aggregate["target_member_id"] in one_hop
+                    ):
+                        selected_member_ids.add(int(aggregate["source_member_id"]))
+                        selected_member_ids.add(int(aggregate["target_member_id"]))
+
+        ranked_members = self._rank_network_members(
+            aggregates, center_member_id=center_member_id, member_ids=selected_member_ids
+        )
+        chosen_member_ids = set(ranked_members[:max(node_limit - 1, 0)])
+        chosen_member_ids.add(center_member_id)
+        visible_edges = [
+            aggregate
+            for aggregate in aggregates
+            if aggregate["source_member_id"] in chosen_member_ids
+            and aggregate["target_member_id"] in chosen_member_ids
+        ][:edge_limit]
+        visible_member_ids = {center_member_id}
+        for aggregate in visible_edges:
+            visible_member_ids.add(int(aggregate["source_member_id"]))
+            visible_member_ids.add(int(aggregate["target_member_id"]))
+        nodes = [
+            self._network_member_node(connection, member_id)
+            for member_id in sorted(visible_member_ids)
+        ]
+        return {
+            "center_member_id": center_member_id,
+            "scope": scope,
+            "nodes": nodes,
+            "edges": visible_edges,
+            "node_limit": node_limit,
+            "edge_limit": edge_limit,
+            "has_more_nodes": len(ranked_members) > max(node_limit - 1, 0),
+            "has_more_edges": len(
+                [
+                    aggregate
+                    for aggregate in aggregates
+                    if aggregate["source_member_id"] in chosen_member_ids
+                    and aggregate["target_member_id"] in chosen_member_ids
+                ]
+            ) > edge_limit,
+        }
+
+    def _list_relationship_aggregate_events(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        platform_id: str,
+        external_group_id: str,
+        source_member_id: int,
+        target_member_id: int | None,
+        event_type: str,
+        limit: int,
+        before_timestamp: int | None,
+        before_id: int | None,
+    ) -> dict[str, object]:
+        group_id = self._group_internal_id(
+            connection, platform_id=platform_id, external_group_id=external_group_id
+        )
+        if group_id is None:
+            return {"events": [], "next_cursor": None}
+        source_ids = self._member_descendant_ids(connection, source_member_id)
+        source_placeholders = ", ".join("?" for _ in source_ids)
+        target_filter = "re.target_member_id IS NULL"
+        params: list[object] = [group_id, event_type, *source_ids]
+        if target_member_id is not None:
+            target_ids = self._member_descendant_ids(connection, target_member_id)
+            target_placeholders = ", ".join("?" for _ in target_ids)
+            target_filter = f"re.target_member_id IN ({target_placeholders})"
+            params.extend(target_ids)
+        cursor_filter = ""
+        if before_timestamp is not None and before_id is not None:
+            cursor_filter = (
+                " AND (re.event_timestamp < ?"
+                " OR (re.event_timestamp = ? AND re.id < ?))"
+            )
+            params.extend((before_timestamp, before_timestamp, before_id))
+        params.append(limit + 1)
+        rows = connection.execute(
+            f"""
+            SELECT re.id, re.source_member_id, re.target_member_id, re.event_type,
+                   re.content, re.event_timestamp, re.confidence, re.source_type,
+                   re.created_at,
+                   su.external_user_id, COALESCE(NULLIF(sm.canonical_name, ''), su.nickname, ''),
+                   tu.external_user_id, COALESCE(NULLIF(tm.canonical_name, ''), tu.nickname, '')
+            FROM "relationship_events" AS re
+            JOIN "members" AS sm ON sm.id = re.source_member_id
+            JOIN "users" AS su ON su.id = sm.user_id
+            LEFT JOIN "members" AS tm ON tm.id = re.target_member_id
+            LEFT JOIN "users" AS tu ON tu.id = tm.user_id
+            WHERE re.group_id = ?
+              AND re.event_type = ?
+              AND re.source_member_id IN ({source_placeholders})
+              AND {target_filter}
+              {cursor_filter}
+            ORDER BY re.event_timestamp DESC, re.id DESC
+            LIMIT ?
+            """,
+            tuple(params),
+        ).fetchall()
+        events: list[dict[str, object]] = []
+        for row in rows:
+            timestamp = int(row[5])
+            event_id = int(row[0])
+            events.append({
+                "id": event_id,
+                "event_type": str(row[3]),
+                "content": str(row[4]),
+                "event_timestamp": timestamp,
+                "confidence": float(row[6]),
+                "source_type": str(row[7]),
+                "created_at": str(row[8]),
+                "source_user_id": str(row[9]),
+                "source_nickname": row[10] or "",
+                "target_user_id": row[11] or "",
+                "target_nickname": row[12] or "",
+            })
+            if len(events) > limit:
+                break
+        has_more = len(events) > limit
+        events = events[:limit]
+        next_cursor = None
+        if has_more and events:
+            last = events[-1]
+            next_cursor = {
+                "before_timestamp": last["event_timestamp"],
+                "before_id": last["id"],
+            }
+        return {"events": events, "next_cursor": next_cursor}
+
+    def _relationship_aggregates_for_group(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        group_id: int,
+        event_types: list[str],
+        source_types: list[str],
+    ) -> list[dict[str, object]]:
+        rows = connection.execute(
+            """
+            SELECT id, source_member_id, target_member_id, event_type, content,
+                   event_timestamp, source_type
+            FROM "relationship_events"
+            WHERE group_id = ?
+            ORDER BY event_timestamp DESC, id DESC
+            """,
+            (group_id,),
+        ).fetchall()
+        grouped: dict[tuple[int, int | None, str], dict[str, object]] = {}
+        for row in rows:
+            event_type = str(row[3])
+            source_type = str(row[6])
+            if event_types and event_type not in event_types:
+                continue
+            if source_types and source_type not in source_types:
+                continue
+            source_member_id = self._canonical_member_id(connection, int(row[1]))
+            target_member_id = (
+                None if row[2] is None
+                else self._canonical_member_id(connection, int(row[2]))
+            )
+            key = (source_member_id, target_member_id, event_type)
+            aggregate = grouped.get(key)
+            if aggregate is None:
+                source = self._network_member_node(connection, source_member_id)
+                target = (
+                    None if target_member_id is None
+                    else self._network_member_node(connection, target_member_id)
+                )
+                aggregate = {
+                    "source_member_id": source_member_id,
+                    "target_member_id": target_member_id,
+                    "event_type": event_type,
+                    "count": 0,
+                    "first_time": int(row[5]),
+                    "last_time": int(row[5]),
+                    "last_evidence": str(row[4]),
+                    "source_counts": {},
+                    "source": source,
+                    "target": target,
+                }
+                grouped[key] = aggregate
+            aggregate["count"] = int(aggregate["count"]) + 1
+            aggregate["first_time"] = min(int(aggregate["first_time"]), int(row[5]))
+            aggregate["last_time"] = max(int(aggregate["last_time"]), int(row[5]))
+            source_counts = aggregate["source_counts"]
+            source_counts[source_type] = int(source_counts.get(source_type, 0)) + 1
+        return sorted(
+            grouped.values(),
+            key=lambda item: (int(item["count"]), int(item["last_time"])),
+            reverse=True,
+        )
+
+    @staticmethod
+    def _rank_network_members(
+        aggregates: list[dict[str, object]],
+        *,
+        center_member_id: int,
+        member_ids: set[int],
+    ) -> list[int]:
+        weights: dict[int, int] = {member_id: 0 for member_id in member_ids}
+        for aggregate in aggregates:
+            weight = int(aggregate["count"])
+            for member_id in (
+                aggregate["source_member_id"], aggregate["target_member_id"]
+            ):
+                if member_id in weights and member_id != center_member_id:
+                    weights[member_id] += weight
+        return [
+            member_id
+            for member_id, _ in sorted(
+                weights.items(), key=lambda item: (item[1], item[0]), reverse=True
+            )
+            if member_id != center_member_id
+        ]
+
+    def _network_member_node(
+        self, connection: sqlite3.Connection, member_id: int
+    ) -> dict[str, object]:
+        identity = self._member_public_identity(connection, member_id)
+        return {
+            **identity,
+            "label": identity["nickname"] or identity["user_id"],
+        }
+
+    @staticmethod
+    def _group_internal_id(
+        connection: sqlite3.Connection,
+        *,
+        platform_id: str,
+        external_group_id: str,
+    ) -> int | None:
+        row = connection.execute(
+            'SELECT id FROM "groups" WHERE platform_id = ? AND external_group_id = ?',
+            (platform_id, external_group_id),
+        ).fetchone()
+        return None if row is None else int(row[0])
 
     @staticmethod
     def _member_descendant_ids(
@@ -2512,6 +2996,27 @@ class GroupMemoryDatabase:
                 """
             )
 
+    @staticmethod
+    def _ensure_version_6_schema(connection: sqlite3.Connection) -> None:
+        """Create read-optimised indexes for live relationship aggregation."""
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_relationship_events_group_type_source_time
+            ON "relationship_events" (
+                group_id, event_type, source_type, event_timestamp DESC, id DESC
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_relationship_events_group_source_target_type_time
+            ON "relationship_events" (
+                group_id, source_member_id, target_member_id, event_type,
+                event_timestamp DESC, id DESC
+            )
+            """
+        )
+
     @classmethod
     def _backfill_version_5_schema(
         cls,
@@ -2910,6 +3415,25 @@ class GroupMemoryDatabase:
             raise ValueError("Database members table has an invalid member status.")
         cls._validate_observed_mention_dedupe_index(connection)
 
+    @classmethod
+    def _validate_version_6_schema(cls, connection: sqlite3.Connection) -> None:
+        cls._validate_named_indexes(
+            connection,
+            {
+                "idx_relationship_events_group_type_source_time": (
+                    "relationship_events",
+                    ("group_id", "event_type", "source_type", "event_timestamp", "id"),
+                ),
+                "idx_relationship_events_group_source_target_type_time": (
+                    "relationship_events",
+                    (
+                        "group_id", "source_member_id", "target_member_id",
+                        "event_type", "event_timestamp", "id",
+                    ),
+                ),
+            },
+        )
+
     @staticmethod
     def _validate_required_columns(
         connection: sqlite3.Connection, required_columns: dict[str, set[str]]
@@ -3128,6 +3652,18 @@ class GroupMemoryDatabase:
             known_ids.add(target_id)
             normalized_targets.append((target_id, target_name or ""))
         return normalized_targets
+
+    @staticmethod
+    def _normalize_choices(value: object, allowed: set[str]) -> list[str]:
+        if not isinstance(value, (list, tuple, set)):
+            return []
+        return sorted(
+            {
+                normalized
+                for item in value
+                if (normalized := str(item).strip().lower()) in allowed
+            }
+        )
 
     @staticmethod
     def _normalize_confidence(value: object) -> float:

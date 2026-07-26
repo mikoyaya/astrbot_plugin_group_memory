@@ -102,6 +102,24 @@ class GroupMemoryPlugin(Star):
             ["GET", "POST"],
             "List or create auditable relationship events.",
         )
+        context.register_web_api(
+            f"/{PLUGIN_NAME}/relationship-aggregates",
+            self.webui_relationship_aggregates,
+            ["GET"],
+            "List live relationship aggregates without replacing evidence.",
+        )
+        context.register_web_api(
+            f"/{PLUGIN_NAME}/relationship-network",
+            self.webui_relationship_network,
+            ["GET"],
+            "Return one bounded relationship graph for the plugin Page.",
+        )
+        context.register_web_api(
+            f"/{PLUGIN_NAME}/relationship-aggregate-events",
+            self.webui_relationship_aggregate_events,
+            ["GET"],
+            "Page raw evidence for one relationship aggregate.",
+        )
 
         try:
             database_path = self._get_database_path()
@@ -768,6 +786,99 @@ class GroupMemoryPlugin(Star):
             return self._webui_error("保存关系事件失败", status_code=500)
         return jsonify({"status": "ok"})
 
+    async def webui_relationship_aggregates(self):
+        """Return bounded, live aggregates while preserving raw evidence rows."""
+        platform_id = self._as_text(request.args.get("platform_id"))
+        external_group_id = self._as_text(
+            request.args.get("group_id") or request.args.get("external_group_id")
+        )
+        external_user_id = self._as_text(
+            request.args.get("user_id") or request.args.get("external_user_id")
+        )
+        if not platform_id or not external_group_id:
+            return self._webui_error("平台和群号不能为空")
+        if not self._database_is_ready_for_webui():
+            return self._webui_database_not_ready()
+        try:
+            aggregates = await asyncio.to_thread(
+                self.database.list_relationship_aggregates,
+                platform_id=platform_id,
+                external_group_id=external_group_id,
+                external_user_id=external_user_id or None,
+                limit=request.args.get("limit", 50, type=int),
+                event_types=self._webui_choice_filters("event_type"),
+                source_types=self._webui_choice_filters("source_type"),
+            )
+        except (TypeError, ValueError, sqlite3.Error, OSError):
+            self._log_exception_throttled(
+                "webui-aggregate-list-failed", "QQ 群档案插件读取关系聚合失败。"
+            )
+            return self._webui_error("读取关系聚合失败", status_code=500)
+        return jsonify({"aggregates": aggregates, "count": len(aggregates)})
+
+    async def webui_relationship_network(self):
+        """Return a deliberately bounded graph for one selected group member."""
+        identity = self._webui_member_identity(request.args)
+        if identity is None:
+            return self._webui_error("缺少关系网中心成员信息")
+        if not self._database_is_ready_for_webui():
+            return self._webui_database_not_ready()
+        try:
+            network = await asyncio.to_thread(
+                self.database.get_relationship_network,
+                platform_id=identity["platform_id"],
+                external_group_id=identity["external_group_id"],
+                external_user_id=identity["external_user_id"],
+                scope=self._as_text(request.args.get("scope")) or "one_hop",
+                node_limit=request.args.get("node_limit", 30, type=int),
+                edge_limit=request.args.get("edge_limit", 50, type=int),
+                event_types=self._webui_choice_filters("event_type"),
+                source_types=self._webui_choice_filters("source_type"),
+            )
+        except (TypeError, ValueError, sqlite3.Error, OSError):
+            self._log_exception_throttled(
+                "webui-network-read-failed", "QQ 群档案插件读取关系网失败。"
+            )
+            return self._webui_error("读取关系网失败", status_code=500)
+        return jsonify(network)
+
+    async def webui_relationship_aggregate_events(self):
+        """Page raw evidence with a timestamp/id cursor for one aggregate."""
+        platform_id = self._as_text(request.args.get("platform_id"))
+        external_group_id = self._as_text(
+            request.args.get("group_id") or request.args.get("external_group_id")
+        )
+        event_type = self._as_text(request.args.get("event_type"))
+        source_member_id = request.args.get("source_member_id", type=int)
+        target_member_id = request.args.get("target_member_id", type=int)
+        if (
+            not platform_id
+            or not external_group_id
+            or not event_type
+            or source_member_id is None
+        ):
+            return self._webui_error("缺少关系聚合定位信息")
+        if not self._database_is_ready_for_webui():
+            return self._webui_database_not_ready()
+        try:
+            result = await asyncio.to_thread(
+                self.database.list_relationship_aggregate_events,
+                platform_id=platform_id,
+                external_group_id=external_group_id,
+                source_member_id=source_member_id,
+                target_member_id=target_member_id,
+                event_type=event_type,
+                limit=request.args.get("limit", 50, type=int),
+                before_timestamp=request.args.get("before_timestamp", type=int),
+                before_id=request.args.get("before_id", type=int),
+            )
+        except (TypeError, ValueError, sqlite3.Error, OSError):
+            self._log_exception_throttled(
+                "webui-aggregate-evidence-failed", "QQ 群档案插件读取关系证据失败。"
+            )
+            return self._webui_error("读取关系证据失败", status_code=500)
+        return jsonify(result)
+
     async def _webui_member_response(self, identity: dict[str, str]):
         """Load the latest details after a Page read or mutation."""
         if not self._database_is_ready_for_webui():
@@ -816,6 +927,15 @@ class GroupMemoryPlugin(Star):
             "external_group_id": external_group_id,
             "external_user_id": external_user_id,
         }
+
+    @staticmethod
+    def _webui_choice_filters(field_name: str) -> list[str]:
+        """Accept repeated query parameters without treating them as trusted SQL."""
+        return [
+            str(value).strip().lower()
+            for value in request.args.getlist(field_name)
+            if str(value).strip()
+        ]
 
     def _database_is_ready_for_webui(self) -> bool:
         return self.database_ready and self.database is not None

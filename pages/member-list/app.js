@@ -2,6 +2,10 @@ const bridge = window.AstrBotPluginPage;
 const refreshButton = document.getElementById("refresh-button");
 const searchInput = document.getElementById("search-input");
 const summary = document.getElementById("summary");
+const membersViewButton = document.getElementById("members-view-button");
+const networkViewButton = document.getElementById("network-view-button");
+const membersView = document.getElementById("members-view");
+const networkView = document.getElementById("network-view");
 const table = document.getElementById("member-table");
 const body = document.getElementById("member-body");
 const emptyState = document.getElementById("empty-state");
@@ -38,9 +42,31 @@ const eventTargetInput = document.getElementById("event-target-input");
 const eventConfidenceInput = document.getElementById("event-confidence-input");
 const eventContentInput = document.getElementById("event-content-input");
 const addEventButton = document.getElementById("add-event-button");
+const openNetworkButton = document.getElementById("open-network-button");
+const networkCenterInput = document.getElementById("network-center-input");
+const networkCenterResults = document.getElementById("network-center-results");
+const networkScopeInput = document.getElementById("network-scope-input");
+const networkTypeInput = document.getElementById("network-type-input");
+const networkSourceInput = document.getElementById("network-source-input");
+const networkLoadButton = document.getElementById("network-load-button");
+const networkExpandButton = document.getElementById("network-expand-button");
+const networkStatus = document.getElementById("network-status");
+const networkCanvas = document.getElementById("network-canvas");
+const networkEmpty = document.getElementById("network-empty");
+const relationshipDialog = document.getElementById("relationship-dialog");
+const relationshipClose = document.getElementById("relationship-close");
+const relationshipSummary = document.getElementById("relationship-summary");
+const relationshipEvidenceList = document.getElementById("relationship-evidence-list");
+const relationshipMoreButton = document.getElementById("relationship-more-button");
 
 let members = [];
 let selectedMember = null;
+let networkCenter = null;
+let networkData = null;
+let networkExpanded = false;
+let activeAggregate = null;
+let activeAggregateIdentity = null;
+let evidenceCursor = null;
 
 function text(value, fallback = "") {
   return value === undefined || value === null ? fallback : String(value);
@@ -84,6 +110,26 @@ function eventTypeLabel(eventType) {
 function eventSourceLabel(sourceType) {
   const labels = { observed: "机器人观察", manual: "人工记录", reported: "他人转述" };
   return labels[text(sourceType)] || text(sourceType, "未知来源");
+}
+
+function aggregateLabel(aggregate) {
+  const source = aggregate.source?.nickname || aggregate.source?.user_id || "未知成员";
+  const target = aggregate.target?.nickname || aggregate.target?.user_id || "无目标成员";
+  return `${source} → ${target} x${aggregate.count}`;
+}
+
+function sourceCountsLabel(sourceCounts) {
+  const entries = Object.entries(sourceCounts || {});
+  if (!entries.length) return "暂无来源";
+  return entries.map(([source, count]) => `${eventSourceLabel(source)} ${count}`).join("；");
+}
+
+function queryString(values) {
+  const query = new URLSearchParams();
+  Object.entries(values).forEach(([key, value]) => {
+    if (value !== undefined && value !== null && value !== "") query.set(key, String(value));
+  });
+  return query.toString();
 }
 
 function sameMember(left, right) {
@@ -147,6 +193,7 @@ function render() {
       member.group_name, member.group_id, member.external_group_id,
       member.nickname, member.user_id, member.external_user_id,
       member.tags, member.note,
+      ...(Array.isArray(member.aliases) ? member.aliases : []),
     ].join(" ").toLocaleLowerCase();
     return !query || searchable.includes(query);
   });
@@ -247,15 +294,28 @@ function eventLabel(event) {
 
 function renderEvents(member) {
   relationshipEventList.replaceChildren();
-  const events = Array.isArray(member.relationship_events) ? member.relationship_events : [];
-  if (!events.length) {
+  const aggregates = Array.isArray(member.relationship_aggregates)
+    ? member.relationship_aggregates : [];
+  if (!aggregates.length) {
     relationshipEventList.append(recordRow({ title: "暂无关系事件", meta: "可人工记录，也会保存唯一明确的 @提及" }));
     return;
   }
-  events.forEach((event) => relationshipEventList.append(recordRow({
-    title: `${eventTypeLabel(event.event_type)} · ${eventLabel(event)}`,
-    meta: `来源：${eventSourceLabel(event.source_type)}；时间：${formatTimestamp(event.event_timestamp)}；置信度：${Math.round(Number(event.confidence || 0) * 100)}%；证据：${text(event.content, "暂无")}`,
-  })));
+  aggregates.forEach((aggregate) => {
+    const row = recordRow({
+      title: `${eventTypeLabel(aggregate.event_type)} · ${aggregateLabel(aggregate)}`,
+      meta: `来源：${sourceCountsLabel(aggregate.source_counts)}；首次：${formatTimestamp(aggregate.first_time)}；最近：${formatTimestamp(aggregate.last_time)}；最后证据：${text(aggregate.last_evidence, "暂无")}`,
+    });
+    row.classList.add("interactive-record");
+    row.tabIndex = 0;
+    row.addEventListener("click", () => openAggregate(aggregate));
+    row.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        openAggregate(aggregate);
+      }
+    });
+    relationshipEventList.append(row);
+  });
 }
 
 function renderLegacyTags(member) {
@@ -297,6 +357,221 @@ function renderDetail(member) {
   renderAliases(member);
   renderLayeredTags(member);
   renderEvents(member);
+}
+
+function setView(view) {
+  const isNetwork = view === "network";
+  membersView.hidden = isNetwork;
+  networkView.hidden = !isNetwork;
+  membersViewButton.classList.toggle("is-active", !isNetwork);
+  networkViewButton.classList.toggle("is-active", isNetwork);
+  if (isNetwork && networkCenter && !networkData) loadNetwork();
+}
+
+function chooseNetworkCenter(member) {
+  networkCenter = { ...memberIdentity(member), member_id: Number(member.member_id || 0) };
+  networkCenterInput.value = member.nickname || member.user_id || member.external_user_id || "";
+  networkData = null;
+  networkExpanded = false;
+  networkCenterResults.hidden = true;
+  setView("network");
+  loadNetwork();
+}
+
+function filteredCenterMembers(query) {
+  const normalized = query.trim().toLocaleLowerCase();
+  if (!normalized) return members.slice(0, 8);
+  return members.filter((member) => [
+    member.nickname, member.user_id, member.external_user_id,
+    member.group_id, member.group_name, member.note, member.tags,
+    ...(Array.isArray(member.aliases) ? member.aliases : []),
+  ].join(" ").toLocaleLowerCase().includes(normalized)).slice(0, 8);
+}
+
+function renderCenterResults() {
+  const matches = filteredCenterMembers(networkCenterInput.value);
+  networkCenterResults.replaceChildren();
+  matches.forEach((member) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = `${member.nickname || "未命名成员"} · QQ ${member.user_id || member.external_user_id}`;
+    button.addEventListener("click", () => chooseNetworkCenter(member));
+    networkCenterResults.append(button);
+  });
+  networkCenterResults.hidden = matches.length === 0;
+}
+
+async function loadNetwork() {
+  if (!networkCenter) {
+    networkStatus.textContent = "请选择一名成员作为关系网中心。";
+    networkEmpty.hidden = false;
+    networkCanvas.replaceChildren();
+    return;
+  }
+  networkLoadButton.disabled = true;
+  networkStatus.textContent = "正在加载关系网…";
+  try {
+    const query = new URLSearchParams({
+      ...networkCenter,
+      scope: networkScopeInput.value,
+      node_limit: networkExpanded ? "100" : "30",
+      edge_limit: networkExpanded ? "200" : "50",
+    });
+    if (networkTypeInput.value) query.append("event_type", networkTypeInput.value);
+    if (networkSourceInput.value) query.append("source_type", networkSourceInput.value);
+    networkData = await bridge.apiGet(`relationship-network?${query.toString()}`);
+    renderNetwork(networkData);
+  } catch (error) {
+    networkData = null;
+    networkCanvas.replaceChildren();
+    networkEmpty.hidden = false;
+    networkStatus.textContent = error.message || "读取关系网失败";
+  } finally {
+    networkLoadButton.disabled = false;
+  }
+}
+
+function svgElement(name, attributes = {}) {
+  const element = document.createElementNS("http://www.w3.org/2000/svg", name);
+  Object.entries(attributes).forEach(([key, value]) => element.setAttribute(key, String(value)));
+  return element;
+}
+
+function nodePositions(nodes, centerMemberId) {
+  const width = 980;
+  const height = 620;
+  const center = nodes.find((node) => Number(node.member_id) === Number(centerMemberId));
+  const positions = new Map();
+  if (center) positions.set(Number(center.member_id), { x: width / 2, y: height / 2 });
+  const others = nodes.filter((node) => Number(node.member_id) !== Number(centerMemberId));
+  others.forEach((node, index) => {
+    const angle = (-Math.PI / 2) + ((Math.PI * 2 * index) / Math.max(others.length, 1));
+    const radius = Math.min(225, 95 + others.length * 7);
+    positions.set(Number(node.member_id), {
+      x: width / 2 + Math.cos(angle) * radius,
+      y: height / 2 + Math.sin(angle) * radius,
+    });
+  });
+  return positions;
+}
+
+function renderNetwork(network) {
+  const nodes = Array.isArray(network.nodes) ? network.nodes : [];
+  const edges = Array.isArray(network.edges) ? network.edges : [];
+  networkCanvas.replaceChildren();
+  networkEmpty.hidden = nodes.length > 0;
+  networkExpandButton.hidden = !(network.has_more_nodes || network.has_more_edges) || networkExpanded;
+  networkStatus.textContent = nodes.length
+    ? `显示 ${nodes.length} 个成员、${edges.length} 条聚合关系${network.has_more_nodes || network.has_more_edges ? "；可展开更多" : ""}。`
+    : "该范围内暂无带明确目标成员的关系事件。";
+  if (!nodes.length) return;
+
+  const defs = svgElement("defs");
+  const marker = svgElement("marker", { id: "relation-arrow", viewBox: "0 0 10 10", refX: 8, refY: 5, markerWidth: 6, markerHeight: 6, orient: "auto-start-reverse" });
+  marker.append(svgElement("path", { d: "M 0 0 L 10 5 L 0 10 z", class: "network-arrow" }));
+  defs.append(marker);
+  networkCanvas.append(defs);
+  const positions = nodePositions(nodes, network.center_member_id);
+
+  edges.forEach((edge) => {
+    const from = positions.get(Number(edge.source_member_id));
+    const to = positions.get(Number(edge.target_member_id));
+    if (!from || !to) return;
+    const group = svgElement("g", { class: "network-edge", tabindex: 0, role: "button" });
+    const width = Math.min(8, 1.5 + Math.sqrt(Number(edge.count || 1)));
+    group.append(svgElement("line", {
+      x1: from.x, y1: from.y, x2: to.x, y2: to.y,
+      "stroke-width": width, "marker-end": "url(#relation-arrow)",
+    }));
+    const label = svgElement("text", { x: (from.x + to.x) / 2, y: (from.y + to.y) / 2 - 7, class: "network-edge-label" });
+    label.textContent = `${eventTypeLabel(edge.event_type)} x${edge.count}`;
+    group.append(label);
+    group.addEventListener("click", () => openAggregate(edge));
+    group.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") { event.preventDefault(); openAggregate(edge); }
+    });
+    networkCanvas.append(group);
+  });
+
+  nodes.forEach((node) => {
+    const position = positions.get(Number(node.member_id));
+    if (!position) return;
+    const group = svgElement("g", {
+      class: `network-node ${Number(node.member_id) === Number(network.center_member_id) ? "center" : ""} ${node.member_status === "mentioned_only" ? "mentioned-only" : ""}`,
+      tabindex: 0, role: "button",
+    });
+    group.append(svgElement("circle", { cx: position.x, cy: position.y, r: Number(node.member_id) === Number(network.center_member_id) ? 36 : 28 }));
+    const label = svgElement("text", { x: position.x, y: position.y + 5, class: "network-node-label" });
+    label.textContent = String(node.label).slice(0, 8);
+    group.append(label);
+    group.addEventListener("click", () => openMember(node));
+    group.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") { event.preventDefault(); openMember(node); }
+    });
+    networkCanvas.append(group);
+  });
+}
+
+function renderAggregateSummary(aggregate) {
+  relationshipSummary.replaceChildren();
+  const fields = [
+    ["关系", `${aggregate.source?.nickname || aggregate.source?.user_id || "未知成员"} → ${aggregate.target?.nickname || aggregate.target?.user_id || "无目标成员"}`],
+    ["类型", eventTypeLabel(aggregate.event_type)],
+    ["数量", `x${aggregate.count}`],
+    ["首次", formatTimestamp(aggregate.first_time)],
+    ["最近", formatTimestamp(aggregate.last_time)],
+    ["来源", sourceCountsLabel(aggregate.source_counts)],
+    ["最后证据", text(aggregate.last_evidence, "暂无")],
+  ];
+  fields.forEach(([label, value]) => {
+    const item = document.createElement("div");
+    const term = document.createElement("dt");
+    const detail = document.createElement("dd");
+    term.textContent = label;
+    detail.textContent = value;
+    item.append(term, detail);
+    relationshipSummary.append(item);
+  });
+}
+
+async function loadAggregateEvidence(append = false) {
+  if (!activeAggregate || !activeAggregateIdentity) return;
+  relationshipMoreButton.disabled = true;
+  try {
+    const cursor = append ? evidenceCursor : null;
+    const query = queryString({
+      platform_id: activeAggregateIdentity.platform_id,
+      group_id: activeAggregateIdentity.group_id,
+      source_member_id: activeAggregate.source_member_id,
+      target_member_id: activeAggregate.target_member_id,
+      event_type: activeAggregate.event_type,
+      before_timestamp: cursor?.before_timestamp,
+      before_id: cursor?.before_id,
+    });
+    const result = await bridge.apiGet(`relationship-aggregate-events?${query}`);
+    if (!append) relationshipEvidenceList.replaceChildren();
+    const events = Array.isArray(result.events) ? result.events : [];
+    events.forEach((event) => relationshipEvidenceList.append(recordRow({
+      title: `${eventTypeLabel(event.event_type)} · ${event.source_nickname || event.source_user_id} → ${event.target_nickname || event.target_user_id || "无目标成员"}`,
+      meta: `来源：${eventSourceLabel(event.source_type)}；时间：${formatTimestamp(event.event_timestamp)}；置信度：${Math.round(Number(event.confidence || 0) * 100)}%；证据：${event.content}`,
+    })));
+    if (!events.length && !append) relationshipEvidenceList.append(recordRow({ title: "暂无可读取的原始证据" }));
+    evidenceCursor = result.next_cursor || null;
+    relationshipMoreButton.hidden = !evidenceCursor;
+  } catch (error) {
+    if (!append) relationshipEvidenceList.replaceChildren(recordRow({ title: "读取原始证据失败", meta: error.message || "请稍后重试" }));
+  } finally {
+    relationshipMoreButton.disabled = false;
+  }
+}
+
+async function openAggregate(aggregate) {
+  activeAggregate = aggregate;
+  activeAggregateIdentity = networkCenter || selectedMember;
+  evidenceCursor = null;
+  renderAggregateSummary(aggregate);
+  if (!relationshipDialog.open) relationshipDialog.showModal();
+  await loadAggregateEvidence();
 }
 
 function syncMember(member) {
@@ -452,6 +727,8 @@ async function addRelationshipEvent() {
     eventTargetInput.value = "";
     eventContentInput.value = "";
   }, "关系事件已记录");
+  networkData = null;
+  if (!networkView.hidden && networkCenter) loadNetwork();
 }
 
 async function loadMembers() {
@@ -474,6 +751,26 @@ async function loadMembers() {
 await bridge.ready();
 refreshButton.addEventListener("click", loadMembers);
 searchInput.addEventListener("input", render);
+membersViewButton.addEventListener("click", () => setView("members"));
+networkViewButton.addEventListener("click", () => setView("network"));
+openNetworkButton.addEventListener("click", () => {
+  if (selectedMember) chooseNetworkCenter(selectedMember);
+});
+networkCenterInput.addEventListener("input", renderCenterResults);
+networkCenterInput.addEventListener("focus", renderCenterResults);
+networkLoadButton.addEventListener("click", () => {
+  networkExpanded = false;
+  loadNetwork();
+});
+networkExpandButton.addEventListener("click", () => {
+  networkExpanded = true;
+  loadNetwork();
+});
+networkScopeInput.addEventListener("change", () => { networkExpanded = false; loadNetwork(); });
+networkTypeInput.addEventListener("change", () => { networkExpanded = false; loadNetwork(); });
+networkSourceInput.addEventListener("change", () => { networkExpanded = false; loadNetwork(); });
+relationshipClose.addEventListener("click", () => relationshipDialog.close());
+relationshipMoreButton.addEventListener("click", () => loadAggregateEvidence(true));
 dialogClose.addEventListener("click", () => dialog.close());
 saveNoteButton.addEventListener("click", saveNote);
 addTagButton.addEventListener("click", addTag);
@@ -489,5 +786,8 @@ aliasInput.addEventListener("keydown", (event) => {
 });
 dialog.addEventListener("click", (event) => {
   if (event.target === dialog) dialog.close();
+});
+relationshipDialog.addEventListener("click", (event) => {
+  if (event.target === relationshipDialog) relationshipDialog.close();
 });
 loadMembers();
