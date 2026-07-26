@@ -138,6 +138,7 @@ class GroupMemoryPlugin(Star):
             message_id = self._as_text(getattr(message_obj, "message_id", None))
             user_nickname = self._as_text(event.get_sender_name())
             message_content = self._as_message_content(event.get_message_str())
+            mention_targets = self._extract_at_mentions(event)
         except (AttributeError, TypeError, ValueError):
             self._log_exception_throttled(
                 "event-fields-invalid",
@@ -159,6 +160,18 @@ class GroupMemoryPlugin(Star):
                 message_id,
             )
             return
+
+        if "@" in message_content and not mention_targets:
+            self._log_warning_throttled(
+                "mention-target-unresolved",
+                "QQ 群档案插件未从消息链解析到普通成员 @ 目标，"
+                "将仅尝试文本别名兜底: platform_id=%s group_id=%s "
+                "user_id=%s message_id=%s",
+                platform_id,
+                group_id,
+                user_id,
+                message_id,
+            )
 
         if not self.database_ready or self.database is None:
             self._log_warning_throttled(
@@ -194,6 +207,7 @@ class GroupMemoryPlugin(Star):
                 platform_message_id=message_id,
                 content=message_content,
                 message_timestamp=timestamp,
+                mention_targets=mention_targets,
             )
         except (AttributeError, TypeError, ValueError, sqlite3.Error, OSError):
             self._log_exception_throttled(
@@ -902,6 +916,50 @@ class GroupMemoryPlugin(Star):
     @staticmethod
     def _as_message_content(value: object) -> str:
         return "" if value is None else str(value)
+
+    def _extract_at_mentions(self, event: AstrMessageEvent) -> list[tuple[str, str]]:
+        """Read structured At components before falling back to plain message text.
+
+        AstrBot's OneBot adapter exposes ordinary group mentions as ``At``
+        components whose ``qq`` field is the target member's QQ number. This
+        must not be inferred from a display name because group cards and
+        nicknames can change or be duplicated.
+        """
+        try:
+            components = event.get_messages()
+        except (AttributeError, TypeError, ValueError):
+            self._log_warning_throttled(
+                "mention-components-unavailable",
+                "QQ 群档案插件无法读取消息链中的 @ 提及组件。",
+            )
+            return []
+        if not isinstance(components, (list, tuple)):
+            return []
+
+        targets: list[tuple[str, str]] = []
+        known_ids: set[str] = set()
+        for component in components:
+            component_type = getattr(component, "type", "")
+            component_type = getattr(component_type, "value", component_type)
+            target_id: object = getattr(component, "qq", None)
+            target_name: object = getattr(component, "name", None)
+            if isinstance(component, dict):
+                component_type = component.get("type", component_type)
+                data = component.get("data")
+                data = data if isinstance(data, dict) else component
+                target_id = data.get("qq", target_id)
+                target_name = data.get("name", target_name)
+            if self._as_text(component_type).lower() != "at":
+                continue
+            normalized_id = self._as_text(target_id)
+            # ``all`` is a broadcast, not an identifiable group member.
+            if not normalized_id or normalized_id.lower() == "all":
+                continue
+            if normalized_id in known_ids:
+                continue
+            known_ids.add(normalized_id)
+            targets.append((normalized_id, self._as_text(target_name)))
+        return targets
 
     def _get_message_timestamp(
         self,

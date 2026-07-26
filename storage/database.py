@@ -72,6 +72,7 @@ class GroupMemoryDatabase:
         platform_message_id: str,
         content: str,
         message_timestamp: int,
+        mention_targets: list[tuple[str, str]] | None = None,
     ) -> bool:
         """Persist one group message and create its base records when needed.
 
@@ -92,6 +93,7 @@ class GroupMemoryDatabase:
         user_nickname = self._optional_text(user_nickname)
         platform_message_id = self._optional_text(platform_message_id) or ""
         content = self._message_content(content)
+        mention_targets = self._normalize_mention_targets(mention_targets)
 
         return self._run_with_retry(
             lambda connection: self._record_group_message_in_transaction(
@@ -105,6 +107,7 @@ class GroupMemoryDatabase:
                 platform_message_id=platform_message_id,
                 content=content,
                 message_timestamp=message_timestamp,
+                mention_targets=mention_targets,
             )
         )
 
@@ -609,6 +612,7 @@ class GroupMemoryDatabase:
         platform_message_id: str,
         content: str,
         message_timestamp: int,
+        mention_targets: list[tuple[str, str]],
     ) -> bool:
         connection.execute("BEGIN IMMEDIATE")
         if platform_message_id:
@@ -676,14 +680,27 @@ class GroupMemoryDatabase:
                 message_timestamp,
             ),
         )
-        self._record_observed_mentions(
-            connection,
-            group_id=group_id,
-            source_member_id=canonical_member_id,
-            message_id=int(cursor.lastrowid),
-            content=content,
-            event_timestamp=message_timestamp,
-        )
+        if mention_targets:
+            self._record_structured_mentions(
+                connection,
+                group_id=group_id,
+                source_member_id=canonical_member_id,
+                message_id=int(cursor.lastrowid),
+                platform_id=platform_id,
+                platform_name=platform_name,
+                mention_targets=mention_targets,
+                content=content,
+                event_timestamp=message_timestamp,
+            )
+        else:
+            self._record_observed_mentions(
+                connection,
+                group_id=group_id,
+                source_member_id=canonical_member_id,
+                message_id=int(cursor.lastrowid),
+                content=content,
+                event_timestamp=message_timestamp,
+            )
         return cursor.rowcount == 1
 
     @staticmethod
@@ -1076,6 +1093,13 @@ class GroupMemoryDatabase:
             WHERE EXISTS (
                 SELECT 1 FROM "messages" AS member_message
                 WHERE member_message.group_id = g.id AND member_message.user_id = u.id
+            ) OR EXISTS (
+                SELECT 1 FROM "relationship_events" AS relation_event
+                WHERE relation_event.group_id = g.id
+                  AND (
+                      relation_event.source_member_id = mem.id
+                      OR relation_event.target_member_id = mem.id
+                  )
             )
             GROUP BY mem.id
             """,
@@ -1885,9 +1909,9 @@ class GroupMemoryDatabase:
         row = connection.execute(
             """
             SELECT g.id, u.id
-            FROM "groups" AS g
-            JOIN "users" AS u ON u.platform_id = g.platform_id
-            JOIN "messages" AS m ON m.group_id = g.id AND m.user_id = u.id
+            FROM "members" AS member
+            JOIN "groups" AS g ON g.id = member.group_id
+            JOIN "users" AS u ON u.id = member.user_id
             WHERE g.platform_id = ?
               AND g.external_group_id = ?
               AND u.external_user_id = ?
@@ -1943,6 +1967,72 @@ class GroupMemoryDatabase:
             )
             """
         )
+
+    def _record_structured_mentions(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        group_id: int,
+        source_member_id: int,
+        message_id: int,
+        platform_id: str,
+        platform_name: str,
+        mention_targets: list[tuple[str, str]],
+        content: str,
+        event_timestamp: int,
+    ) -> None:
+        """Persist QQ At components using their stable target user ID.
+
+        A target may never have sent a message. We still create its platform
+        user and group member identity here, so the observed event is not
+        silently lost merely because the target has no existing profile.
+        """
+        for target_external_user_id, target_name in mention_targets:
+            target_user_id = self._upsert_user(
+                connection,
+                platform_id=platform_id,
+                platform_name=platform_name,
+                external_user_id=target_external_user_id,
+                nickname=target_name or None,
+            )
+            connection.execute(
+                'INSERT OR IGNORE INTO "profiles" (user_id) VALUES (?)',
+                (target_user_id,),
+            )
+            target_member_id = self._ensure_member(
+                connection,
+                group_id=group_id,
+                user_id=target_user_id,
+                canonical_name=target_name or None,
+            )
+            target_member_id = self._canonical_member_id(
+                connection, target_member_id
+            )
+            if target_name:
+                self._upsert_member_alias(
+                    connection,
+                    member_id=target_member_id,
+                    alias=target_name,
+                    alias_type="mention",
+                    confidence=1.0,
+                    source_type="observed",
+                )
+            connection.execute(
+                """
+                INSERT INTO "relationship_events" (
+                    group_id, source_member_id, target_member_id, event_type,
+                    content, message_id, event_timestamp, confidence, source_type
+                ) VALUES (?, ?, ?, 'mention', ?, ?, ?, 1.0, 'observed')
+                """,
+                (
+                    group_id,
+                    source_member_id,
+                    target_member_id,
+                    content,
+                    message_id,
+                    event_timestamp,
+                ),
+            )
 
     @staticmethod
     def _get_schema_version(connection: sqlite3.Connection) -> int:
@@ -2751,6 +2841,26 @@ class GroupMemoryDatabase:
     @staticmethod
     def _normalize_reference(value: object) -> str:
         return "".join(str(value).strip().casefold().split())
+
+    @classmethod
+    def _normalize_mention_targets(
+        cls, value: object
+    ) -> list[tuple[str, str]]:
+        """Accept only stable, de-duplicated target IDs from the event layer."""
+        if not isinstance(value, (list, tuple)):
+            return []
+        normalized_targets: list[tuple[str, str]] = []
+        known_ids: set[str] = set()
+        for item in value:
+            if not isinstance(item, (list, tuple)) or not item:
+                continue
+            target_id = cls._optional_text(item[0])
+            target_name = cls._optional_text(item[1]) if len(item) > 1 else None
+            if target_id is None or target_id.lower() == "all" or target_id in known_ids:
+                continue
+            known_ids.add(target_id)
+            normalized_targets.append((target_id, target_name or ""))
+        return normalized_targets
 
     @staticmethod
     def _normalize_confidence(value: object) -> float:
