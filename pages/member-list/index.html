@@ -49,6 +49,47 @@
         </div>
       </section>
     </main>
+
+    <dialog id="member-dialog" class="member-dialog" aria-labelledby="detail-title">
+      <section class="dialog-shell">
+        <header class="dialog-header">
+          <div>
+            <p class="eyebrow">MEMBER PROFILE</p>
+            <h2 id="detail-title">成员详情</h2>
+          </div>
+          <button id="dialog-close" class="icon-button" type="button" title="关闭" aria-label="关闭">×</button>
+        </header>
+
+        <p id="detail-status" class="dialog-status" aria-live="polite"></p>
+        <dl class="detail-grid">
+          <div><dt>QQ号</dt><dd id="detail-user-id">-</dd></div>
+          <div><dt>昵称</dt><dd id="detail-nickname">-</dd></div>
+          <div><dt>所属群</dt><dd id="detail-group">-</dd></div>
+          <div><dt>消息数</dt><dd id="detail-message-count">-</dd></div>
+          <div><dt>最近消息</dt><dd id="detail-last-message">-</dd></div>
+          <div><dt>基础画像</dt><dd id="detail-profile">暂无</dd></div>
+        </dl>
+
+        <section class="editor-section" aria-labelledby="note-heading">
+          <div class="section-heading">
+            <h3 id="note-heading">备注</h3>
+            <button id="save-note-button" class="command-button" type="button">保存备注</button>
+          </div>
+          <textarea id="note-input" rows="3" placeholder="输入当前群内备注"></textarea>
+        </section>
+
+        <section class="editor-section" aria-labelledby="tag-heading">
+          <div class="section-heading">
+            <h3 id="tag-heading">标签</h3>
+          </div>
+          <div id="detail-tag-list" class="tag-list" aria-label="成员标签"></div>
+          <div class="tag-editor">
+            <input id="tag-input" type="text" maxlength="64" placeholder="输入新标签" />
+            <button id="add-tag-button" class="command-button" type="button">添加标签</button>
+          </div>
+        </section>
+      </section>
+    </dialog>
     <script type="module" src="./app.js"></script>
   </body>
 </html>

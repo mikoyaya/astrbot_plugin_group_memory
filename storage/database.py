@@ -183,6 +183,33 @@ class GroupMemoryDatabase:
             )
         )
 
+    def remove_tag(
+        self,
+        *,
+        platform_id: str,
+        external_group_id: str,
+        external_user_id: str,
+        tag_name: str,
+    ) -> bool:
+        """Detach one tag from a known group member.
+
+        The reusable tag definition stays in ``tags`` so it remains available
+        for other members and groups.
+        """
+        return self._run_with_retry(
+            lambda connection: self._remove_tag_in_transaction(
+                connection,
+                platform_id=self._require_identifier("platform_id", platform_id),
+                external_group_id=self._require_identifier(
+                    "external_group_id", external_group_id
+                ),
+                external_user_id=self._require_identifier(
+                    "external_user_id", external_user_id
+                ),
+                tag_name=self._require_identifier("tag_name", tag_name),
+            )
+        )
+
     def get_profile_overview(
         self,
         *,
@@ -258,7 +285,7 @@ class GroupMemoryDatabase:
         )
 
     def list_member_overview(self, limit: int | None = None) -> list[dict[str, object]]:
-        """Return recent group-member data for the read-only plugin Page."""
+        """Return recent group-member data for the plugin Page."""
         requested_limit = (
             self.DEFAULT_WEBUI_MEMBER_LIMIT if limit is None else int(limit)
         )
@@ -531,6 +558,38 @@ class GroupMemoryDatabase:
         ).fetchall()
         return [str(row[0]) for row in rows]
 
+    def _remove_tag_in_transaction(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        platform_id: str,
+        external_group_id: str,
+        external_user_id: str,
+        tag_name: str,
+    ) -> bool:
+        connection.execute("BEGIN IMMEDIATE")
+        member_ids = self._find_member_ids(
+            connection,
+            platform_id=platform_id,
+            external_group_id=external_group_id,
+            external_user_id=external_user_id,
+        )
+        if member_ids is None:
+            raise ValueError("Target group member has not been recorded yet.")
+        group_id, user_id = member_ids
+        cursor = connection.execute(
+            """
+            DELETE FROM "user_tags"
+            WHERE group_id = ?
+              AND user_id = ?
+              AND tag_id = (
+                  SELECT id FROM "tags" WHERE name = ? COLLATE NOCASE
+              )
+            """,
+            (group_id, user_id, tag_name),
+        )
+        return cursor.rowcount == 1
+
     def _get_profile_overview(
         self,
         connection: sqlite3.Connection,
@@ -542,6 +601,10 @@ class GroupMemoryDatabase:
         row = connection.execute(
             """
             SELECT
+                g.platform_id,
+                g.platform_name,
+                g.external_group_id,
+                g.group_name,
                 u.external_user_id,
                 u.nickname,
                 p.summary,
@@ -570,12 +633,18 @@ class GroupMemoryDatabase:
         if row is None:
             return None
         return {
-            "external_user_id": str(row[0]),
-            "nickname": row[1] or "",
-            "summary": row[2] or "",
-            "message_count": int(row[3] or 0),
-            "last_message_timestamp": row[4],
-            "note": row[5] or "",
+            "platform_id": str(row[0]),
+            "platform_name": row[1] or "",
+            "group_id": str(row[2]),
+            "external_group_id": str(row[2]),
+            "group_name": row[3] or "",
+            "user_id": str(row[4]),
+            "external_user_id": str(row[4]),
+            "nickname": row[5] or "",
+            "summary": row[6] or "",
+            "message_count": int(row[7] or 0),
+            "last_message_timestamp": row[8],
+            "note": row[9] or "",
             "tags": self._list_tags(
                 connection,
                 platform_id=platform_id,
@@ -667,6 +736,7 @@ class GroupMemoryDatabase:
         rows = connection.execute(
             """
             SELECT
+                g.platform_id,
                 g.platform_name,
                 g.external_group_id,
                 g.group_name,
@@ -697,15 +767,18 @@ class GroupMemoryDatabase:
         ).fetchall()
         return [
             {
-                "platform_name": row[0] or "",
-                "external_group_id": str(row[1]),
-                "group_name": row[2] or "",
-                "external_user_id": str(row[3]),
-                "nickname": row[4] or "",
-                "message_count": int(row[5] or 0),
-                "last_message_timestamp": row[6],
-                "note": row[7] or "",
-                "tags": row[8] or "",
+                "platform_id": str(row[0]),
+                "platform_name": row[1] or "",
+                "group_id": str(row[2]),
+                "external_group_id": str(row[2]),
+                "group_name": row[3] or "",
+                "user_id": str(row[4]),
+                "external_user_id": str(row[4]),
+                "nickname": row[5] or "",
+                "message_count": int(row[6] or 0),
+                "last_message_timestamp": row[7],
+                "note": row[8] or "",
+                "tags": row[9] or "",
             }
             for row in rows
         ]

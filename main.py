@@ -42,6 +42,30 @@ class GroupMemoryPlugin(Star):
             ["GET"],
             "List recorded QQ group members for the plugin Page.",
         )
+        context.register_web_api(
+            f"/{PLUGIN_NAME}/member",
+            self.webui_member_detail,
+            ["GET"],
+            "Get one recorded QQ group member for the plugin Page.",
+        )
+        context.register_web_api(
+            f"/{PLUGIN_NAME}/member/note",
+            self.webui_member_note,
+            ["POST"],
+            "Update one recorded QQ group member note.",
+        )
+        context.register_web_api(
+            f"/{PLUGIN_NAME}/member/tags/add",
+            self.webui_member_tag_add,
+            ["POST"],
+            "Add one tag to a recorded QQ group member.",
+        )
+        context.register_web_api(
+            f"/{PLUGIN_NAME}/member/tags/remove",
+            self.webui_member_tag_remove,
+            ["POST"],
+            "Remove one tag from a recorded QQ group member.",
+        )
 
         try:
             database_path = self._get_database_path()
@@ -378,7 +402,7 @@ class GroupMemoryPlugin(Star):
         )
 
     async def webui_members(self):
-        """Return a read-only member list to the bundled AstrBot plugin Page."""
+        """Return a member list to the bundled AstrBot plugin Page."""
         if not self.database_ready or self.database is None:
             return jsonify({"status": "error", "message": "数据库尚未就绪"}), 503
         database = self.database
@@ -398,6 +422,150 @@ class GroupMemoryPlugin(Star):
             )
             return jsonify({"status": "error", "message": "读取成员数据失败"}), 500
         return jsonify({"members": members, "count": len(members)})
+
+    async def webui_member_detail(self):
+        """Return one group member profile for the bundled plugin Page."""
+        identity = self._webui_member_identity(request.args)
+        if identity is None:
+            return self._webui_error("缺少成员定位信息")
+        return await self._webui_member_response(identity)
+
+    async def webui_member_note(self):
+        """Save one group-scoped member note from the bundled plugin Page."""
+        payload = await self._webui_json_payload()
+        if payload is None:
+            return self._webui_error("请求数据格式不正确")
+        identity = self._webui_member_identity(payload)
+        content = self._as_text(payload.get("content"))
+        if identity is None or not content:
+            return self._webui_error("成员定位信息和备注内容不能为空")
+        if not self._database_is_ready_for_webui():
+            return self._webui_database_not_ready()
+        try:
+            await asyncio.to_thread(
+                self.database.set_note,
+                platform_id=identity["platform_id"],
+                external_group_id=identity["external_group_id"],
+                external_user_id=identity["external_user_id"],
+                content=content,
+            )
+        except (ValueError, sqlite3.Error, OSError):
+            self._log_exception_throttled(
+                "webui-note-write-failed", "QQ 群档案插件保存 WebUI 备注失败。"
+            )
+            return self._webui_error("保存备注失败", status_code=500)
+        return await self._webui_member_response(identity)
+
+    async def webui_member_tag_add(self):
+        """Add one group-scoped member tag from the bundled plugin Page."""
+        payload = await self._webui_json_payload()
+        if payload is None:
+            return self._webui_error("请求数据格式不正确")
+        identity = self._webui_member_identity(payload)
+        tag_name = self._as_text(payload.get("tag_name"))
+        if identity is None or not tag_name:
+            return self._webui_error("成员定位信息和标签不能为空")
+        if not self._database_is_ready_for_webui():
+            return self._webui_database_not_ready()
+        try:
+            await asyncio.to_thread(
+                self.database.add_tag,
+                platform_id=identity["platform_id"],
+                external_group_id=identity["external_group_id"],
+                external_user_id=identity["external_user_id"],
+                tag_name=tag_name,
+            )
+        except (ValueError, sqlite3.Error, OSError):
+            self._log_exception_throttled(
+                "webui-tag-add-failed", "QQ 群档案插件添加 WebUI 标签失败。"
+            )
+            return self._webui_error("添加标签失败", status_code=500)
+        return await self._webui_member_response(identity)
+
+    async def webui_member_tag_remove(self):
+        """Remove one group-scoped member tag from the bundled plugin Page."""
+        payload = await self._webui_json_payload()
+        if payload is None:
+            return self._webui_error("请求数据格式不正确")
+        identity = self._webui_member_identity(payload)
+        tag_name = self._as_text(payload.get("tag_name"))
+        if identity is None or not tag_name:
+            return self._webui_error("成员定位信息和标签不能为空")
+        if not self._database_is_ready_for_webui():
+            return self._webui_database_not_ready()
+        try:
+            await asyncio.to_thread(
+                self.database.remove_tag,
+                platform_id=identity["platform_id"],
+                external_group_id=identity["external_group_id"],
+                external_user_id=identity["external_user_id"],
+                tag_name=tag_name,
+            )
+        except (ValueError, sqlite3.Error, OSError):
+            self._log_exception_throttled(
+                "webui-tag-remove-failed", "QQ 群档案插件删除 WebUI 标签失败。"
+            )
+            return self._webui_error("删除标签失败", status_code=500)
+        return await self._webui_member_response(identity)
+
+    async def _webui_member_response(self, identity: dict[str, str]):
+        """Load the latest details after a Page read or mutation."""
+        if not self._database_is_ready_for_webui():
+            return self._webui_database_not_ready()
+        try:
+            member = await asyncio.to_thread(
+                self.database.get_profile_overview,
+                platform_id=identity["platform_id"],
+                external_group_id=identity["external_group_id"],
+                external_user_id=identity["external_user_id"],
+            )
+        except (ValueError, sqlite3.Error, OSError):
+            self._log_exception_throttled(
+                "webui-member-detail-failed", "QQ 群档案插件读取 WebUI 成员详情失败。"
+            )
+            return self._webui_error("读取成员详情失败", status_code=500)
+        if member is None:
+            return self._webui_error("未找到已记录的群成员", status_code=404)
+        return jsonify({"member": member})
+
+    async def _webui_json_payload(self) -> dict[str, object] | None:
+        """Read an object-shaped Quart JSON body without exposing parse errors."""
+        try:
+            payload = await request.get_json()
+        except (TypeError, ValueError):
+            return None
+        return payload if isinstance(payload, dict) else None
+
+    def _webui_member_identity(
+        self, source: object
+    ) -> dict[str, str] | None:
+        """Normalize Page identifiers while accepting old external field names."""
+        if not hasattr(source, "get"):
+            return None
+        platform_id = self._as_text(source.get("platform_id"))
+        external_group_id = self._as_text(
+            source.get("group_id") or source.get("external_group_id")
+        )
+        external_user_id = self._as_text(
+            source.get("user_id") or source.get("external_user_id")
+        )
+        if not platform_id or not external_group_id or not external_user_id:
+            return None
+        return {
+            "platform_id": platform_id,
+            "external_group_id": external_group_id,
+            "external_user_id": external_user_id,
+        }
+
+    def _database_is_ready_for_webui(self) -> bool:
+        return self.database_ready and self.database is not None
+
+    @staticmethod
+    def _webui_error(message: str, status_code: int = 400):
+        return jsonify({"status": "error", "message": message}), status_code
+
+    def _webui_database_not_ready(self):
+        return self._webui_error("数据库尚未就绪", status_code=503)
 
     async def _database_call(self, warning_key: str, operation, *args, **kwargs):
         """Run short SQLite operations away from AstrBot's event loop."""
