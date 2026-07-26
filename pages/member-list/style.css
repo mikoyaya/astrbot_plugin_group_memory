@@ -98,7 +98,7 @@ h1 { margin: 0; font-size: 24px; font-weight: 700; letter-spacing: 0; }
 
 .table-region { overflow: hidden; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); }
 .table-scroll { overflow-x: auto; }
-table { width: 100%; min-width: 780px; border-collapse: collapse; }
+table { width: 100%; min-width: 880px; border-collapse: collapse; }
 th, td { padding: 13px 14px; border-bottom: 1px solid var(--border); text-align: left; font-size: 14px; vertical-align: top; }
 th { background: var(--surface-muted); color: var(--muted); font-weight: 600; white-space: nowrap; }
 tbody tr:last-child td { border-bottom: 0; }
@@ -111,6 +111,11 @@ tbody tr:last-child td { border-bottom: 0; }
 .member-link { width: 100%; padding: 0; border: 0; background: transparent; text-align: left; cursor: pointer; }
 .member-link:hover strong, .member-link:focus-visible strong { color: var(--accent); }
 .member-link:focus-visible, .icon-button:focus-visible, .command-button:focus-visible, .tag-chip button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.status-cell { color: var(--accent); font-weight: 600; white-space: nowrap; }
+.member-status-badge { display: inline-block; width: fit-content; margin-top: 5px; padding: 2px 6px; border-radius: 3px; font-size: 11px; font-weight: 700; line-height: 1.25; }
+.member-status-badge.mentioned-only, .status-cell.mentioned-only { color: #a44700; }
+.member-status-badge.mentioned-only { border: 1px solid #f6c56a; background: #fff3d6; }
+[data-theme="dark"] .member-status-badge.mentioned-only { border-color: #a65f00; background: #45310d; color: #f6c56a; }
 
 .empty-state { padding: 56px 24px; text-align: center; }
 .empty-state strong { display: block; margin-bottom: 8px; font-size: 16px; }

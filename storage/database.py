@@ -24,7 +24,7 @@ class GroupMemoryDatabase:
     changing the current identity model.
     """
 
-    SCHEMA_VERSION = 4
+    SCHEMA_VERSION = 5
     BUSY_TIMEOUT_MS = 1_000
     WRITE_RETRY_ATTEMPTS = 3
     WRITE_RETRY_DELAY_SECONDS = 0.05
@@ -585,16 +585,30 @@ class GroupMemoryDatabase:
                 "Database schema is newer than this plugin version supports."
             )
 
+        member_status_missing = "member_status" not in {
+            str(row[1])
+            for row in connection.execute('PRAGMA table_info("members")')
+        }
+
         # These operations are deliberately idempotent. They repair a database
-        # labelled v2/v3 when a table or index was removed outside the plugin.
+        # labelled with a supported version when a table, column, or index was
+        # removed outside the plugin.
         self._ensure_version_2_schema(connection)
         self._ensure_version_3_schema(connection)
         self._ensure_version_4_schema(connection)
+        self._ensure_version_5_schema(connection)
         self._backfill_profiles(connection)
         self._backfill_members(connection)
+        self._backfill_version_5_schema(
+            connection,
+            reconstruct_member_status=(
+                schema_version < self.SCHEMA_VERSION or member_status_missing
+            ),
+        )
         self._validate_version_2_schema(connection)
         self._validate_version_3_schema(connection)
         self._validate_version_4_schema(connection)
+        self._validate_version_5_schema(connection)
 
         if schema_version < self.SCHEMA_VERSION:
             self._set_schema_version(connection, self.SCHEMA_VERSION)
@@ -652,6 +666,7 @@ class GroupMemoryDatabase:
             group_id=group_id,
             user_id=user_id,
             canonical_name=user_nickname,
+            member_status="normal",
         )
         canonical_member_id = self._canonical_member_id(connection, member_id)
         if user_nickname:
@@ -686,6 +701,7 @@ class GroupMemoryDatabase:
                 group_id=group_id,
                 source_member_id=canonical_member_id,
                 message_id=int(cursor.lastrowid),
+                platform_message_id=platform_message_id,
                 platform_id=platform_id,
                 platform_name=platform_name,
                 mention_targets=mention_targets,
@@ -698,6 +714,7 @@ class GroupMemoryDatabase:
                 group_id=group_id,
                 source_member_id=canonical_member_id,
                 message_id=int(cursor.lastrowid),
+                platform_message_id=platform_message_id,
                 content=content,
                 event_timestamp=message_timestamp,
             )
@@ -964,6 +981,7 @@ class GroupMemoryDatabase:
             "user_id": str(row[4]),
             "external_user_id": str(row[4]),
             "nickname": row[5] or "",
+            "member_status": str(canonical_identity["member_status"]),
             "summary": row[6] or "",
             "message_count": message_count,
             "last_message_timestamp": last_message_timestamp,
@@ -1134,6 +1152,7 @@ class GroupMemoryDatabase:
                     "user_id": str(canonical_identity["user_id"]),
                     "external_user_id": str(canonical_identity["user_id"]),
                     "nickname": canonical_identity["nickname"] or row[6] or "",
+                    "member_status": str(canonical_identity["member_status"]),
                     "message_count": message_count,
                     "last_message_timestamp": last_message_timestamp,
                     "note": self._get_note(
@@ -1223,19 +1242,30 @@ class GroupMemoryDatabase:
         group_id: int,
         user_id: int,
         canonical_name: str | None,
+        member_status: str = "normal",
     ) -> int:
+        if member_status not in {"normal", "mentioned_only"}:
+            raise ValueError("member_status is invalid")
         connection.execute(
             """
-            INSERT INTO "members" (group_id, user_id, canonical_name)
-            VALUES (?, ?, COALESCE(?, ''))
+            INSERT INTO "members" (
+                group_id, user_id, canonical_name, member_status
+            ) VALUES (?, ?, COALESCE(?, ''), ?)
             ON CONFLICT(group_id, user_id) DO UPDATE SET
                 canonical_name = CASE
                     WHEN excluded.canonical_name <> '' THEN excluded.canonical_name
                     ELSE "members".canonical_name
                 END,
+                -- A sender has a real group message. That evidence is stronger
+                -- than an observed @ mention and must never be downgraded.
+                member_status = CASE
+                    WHEN "members".member_status = 'normal'
+                      OR excluded.member_status = 'normal' THEN 'normal'
+                    ELSE 'mentioned_only'
+                END,
                 updated_at = CURRENT_TIMESTAMP
             """,
-            (group_id, user_id, canonical_name),
+            (group_id, user_id, canonical_name, member_status),
         )
         return int(
             connection.execute(
@@ -1386,7 +1416,8 @@ class GroupMemoryDatabase:
         row = connection.execute(
             """
             SELECT m.id, g.platform_id, g.external_group_id, u.external_user_id,
-                   COALESCE(NULLIF(m.canonical_name, ''), u.nickname, '') AS nickname
+                   COALESCE(NULLIF(m.canonical_name, ''), u.nickname, '') AS nickname,
+                   m.member_status
             FROM "members" AS m
             JOIN "groups" AS g ON g.id = m.group_id
             JOIN "users" AS u ON u.id = m.user_id
@@ -1402,6 +1433,7 @@ class GroupMemoryDatabase:
             "group_id": str(row[2]),
             "user_id": str(row[3]),
             "nickname": row[4] or "",
+            "member_status": str(row[5]),
         }
 
     def _resolve_member_reference(
@@ -1526,6 +1558,14 @@ class GroupMemoryDatabase:
                 confidence=1.0,
                 source_type="manual",
             )
+        connection.execute(
+            """
+            UPDATE "members"
+            SET member_status = 'normal', updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (target_member_id,),
+        )
         connection.execute(
             """
             UPDATE "members"
@@ -1844,6 +1884,7 @@ class GroupMemoryDatabase:
         group_id: int,
         source_member_id: int,
         message_id: int,
+        platform_message_id: str,
         content: str,
         event_timestamp: int,
     ) -> None:
@@ -1881,12 +1922,16 @@ class GroupMemoryDatabase:
             if len(target_ids) != 1:
                 continue
             target_member_id = target_ids.pop()
+            target_identity = self._member_public_identity(
+                connection, target_member_id
+            )
             connection.execute(
                 """
-                INSERT INTO "relationship_events" (
+                INSERT OR IGNORE INTO "relationship_events" (
                     group_id, source_member_id, target_member_id, event_type,
-                    content, message_id, event_timestamp, confidence, source_type
-                ) VALUES (?, ?, ?, 'mention', ?, ?, ?, 1.0, 'observed')
+                    content, message_id, platform_message_id,
+                    mention_target_user_id, event_timestamp, confidence, source_type
+                ) VALUES (?, ?, ?, 'mention', ?, ?, ?, ?, ?, 1.0, 'observed')
                 """,
                 (
                     group_id,
@@ -1894,6 +1939,8 @@ class GroupMemoryDatabase:
                     target_member_id,
                     content,
                     message_id,
+                    platform_message_id,
+                    target_identity["user_id"],
                     event_timestamp,
                 ),
             )
@@ -1975,6 +2022,7 @@ class GroupMemoryDatabase:
         group_id: int,
         source_member_id: int,
         message_id: int,
+        platform_message_id: str,
         platform_id: str,
         platform_name: str,
         mention_targets: list[tuple[str, str]],
@@ -2004,6 +2052,7 @@ class GroupMemoryDatabase:
                 group_id=group_id,
                 user_id=target_user_id,
                 canonical_name=target_name or None,
+                member_status="mentioned_only",
             )
             target_member_id = self._canonical_member_id(
                 connection, target_member_id
@@ -2019,10 +2068,11 @@ class GroupMemoryDatabase:
                 )
             connection.execute(
                 """
-                INSERT INTO "relationship_events" (
+                INSERT OR IGNORE INTO "relationship_events" (
                     group_id, source_member_id, target_member_id, event_type,
-                    content, message_id, event_timestamp, confidence, source_type
-                ) VALUES (?, ?, ?, 'mention', ?, ?, ?, 1.0, 'observed')
+                    content, message_id, platform_message_id,
+                    mention_target_user_id, event_timestamp, confidence, source_type
+                ) VALUES (?, ?, ?, 'mention', ?, ?, ?, ?, ?, 1.0, 'observed')
                 """,
                 (
                     group_id,
@@ -2030,6 +2080,8 @@ class GroupMemoryDatabase:
                     target_member_id,
                     content,
                     message_id,
+                    platform_message_id,
+                    target_external_user_id,
                     event_timestamp,
                 ),
             )
@@ -2427,6 +2479,151 @@ class GroupMemoryDatabase:
         )
 
     @staticmethod
+    def _ensure_version_5_schema(connection: sqlite3.Connection) -> None:
+        """Add v5 member state and automatic-mention idempotency fields."""
+        member_columns = {
+            str(row[1])
+            for row in connection.execute('PRAGMA table_info("members")')
+        }
+        if "member_status" not in member_columns:
+            connection.execute(
+                """
+                ALTER TABLE "members"
+                ADD COLUMN member_status TEXT NOT NULL DEFAULT 'normal'
+                """
+            )
+
+        event_columns = {
+            str(row[1])
+            for row in connection.execute('PRAGMA table_info("relationship_events")')
+        }
+        if "platform_message_id" not in event_columns:
+            connection.execute(
+                """
+                ALTER TABLE "relationship_events"
+                ADD COLUMN platform_message_id TEXT NOT NULL DEFAULT ''
+                """
+            )
+        if "mention_target_user_id" not in event_columns:
+            connection.execute(
+                """
+                ALTER TABLE "relationship_events"
+                ADD COLUMN mention_target_user_id TEXT NOT NULL DEFAULT ''
+                """
+            )
+
+    @classmethod
+    def _backfill_version_5_schema(
+        cls,
+        connection: sqlite3.Connection,
+        *,
+        reconstruct_member_status: bool,
+    ) -> None:
+        """Repair v5 data derived from prior message and mention evidence."""
+        connection.execute(
+            """
+            UPDATE "relationship_events"
+            SET platform_message_id = COALESCE((
+                SELECT msg.platform_message_id
+                FROM "messages" AS msg
+                WHERE msg.id = "relationship_events".message_id
+            ), '')
+            WHERE platform_message_id = ''
+            """
+        )
+        connection.execute(
+            """
+            UPDATE "relationship_events"
+            SET mention_target_user_id = COALESCE((
+                SELECT user.external_user_id
+                FROM "members" AS member
+                JOIN "users" AS user ON user.id = member.user_id
+                WHERE member.id = "relationship_events".target_member_id
+            ), '')
+            WHERE mention_target_user_id = ''
+              AND event_type = 'mention'
+              AND source_type = 'observed'
+            """
+        )
+
+        if reconstruct_member_status:
+            # v4 had no explicit member state. Start with pure observed mention
+            # targets, then promote known senders and manual merge targets.
+            connection.execute(
+                """
+                UPDATE "members" AS member
+                SET member_status = 'mentioned_only', updated_at = CURRENT_TIMESTAMP
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM "messages" AS msg
+                    WHERE msg.group_id = member.group_id AND msg.user_id = member.user_id
+                )
+                  AND EXISTS (
+                    SELECT 1 FROM "relationship_events" AS event
+                    WHERE event.target_member_id = member.id
+                      AND event.event_type = 'mention'
+                      AND event.source_type = 'observed'
+                )
+                """
+            )
+            connection.execute(
+                """
+                UPDATE "members" AS member
+                SET member_status = 'normal', updated_at = CURRENT_TIMESTAMP
+                WHERE EXISTS (
+                    SELECT 1 FROM "messages" AS msg
+                    WHERE msg.group_id = member.group_id AND msg.user_id = member.user_id
+                )
+                """
+            )
+            connection.execute(
+                """
+                UPDATE "members"
+                SET member_status = 'normal', updated_at = CURRENT_TIMESTAMP
+                WHERE id IN (
+                    SELECT target_member_id FROM "identity_merge_history"
+                )
+                """
+            )
+
+        # Existing v4 rows can contain repeated observations. Keep the oldest
+        # evidence before creating the partial uniqueness constraint.
+        connection.execute(
+            """
+            DELETE FROM "relationship_events"
+            WHERE id IN (
+                SELECT duplicate.id
+                FROM "relationship_events" AS duplicate
+                JOIN "relationship_events" AS original
+                  ON original.group_id = duplicate.group_id
+                 AND original.platform_message_id = duplicate.platform_message_id
+                 AND original.mention_target_user_id = duplicate.mention_target_user_id
+                 AND original.event_type = 'mention'
+                 AND original.source_type = 'observed'
+                 AND original.id < duplicate.id
+                WHERE duplicate.event_type = 'mention'
+                  AND duplicate.source_type = 'observed'
+                  AND duplicate.platform_message_id <> ''
+                  AND duplicate.mention_target_user_id <> ''
+            )
+            """
+        )
+        connection.execute(
+            'DROP INDEX IF EXISTS idx_relationship_events_observed_mention_dedupe'
+        )
+        connection.execute(
+            """
+            CREATE UNIQUE INDEX idx_relationship_events_observed_mention_dedupe
+            ON "relationship_events" (
+                group_id, platform_message_id, mention_target_user_id
+            )
+            WHERE event_type = 'mention'
+              AND source_type = 'observed'
+              AND platform_message_id <> ''
+              AND mention_target_user_id <> ''
+            """
+        )
+
+    @staticmethod
     def _backfill_profiles(connection: sqlite3.Connection) -> None:
         """Give users from v2 databases an empty, extension-ready profile."""
         connection.execute(
@@ -2691,6 +2888,28 @@ class GroupMemoryDatabase:
             },
         )
 
+    @classmethod
+    def _validate_version_5_schema(cls, connection: sqlite3.Connection) -> None:
+        cls._validate_required_columns(
+            connection,
+            {
+                "members": {"member_status"},
+                "relationship_events": {
+                    "platform_message_id", "mention_target_user_id",
+                },
+            },
+        )
+        invalid_status = connection.execute(
+            """
+            SELECT 1 FROM "members"
+            WHERE member_status NOT IN ('normal', 'mentioned_only')
+            LIMIT 1
+            """
+        ).fetchone()
+        if invalid_status is not None:
+            raise ValueError("Database members table has an invalid member status.")
+        cls._validate_observed_mention_dedupe_index(connection)
+
     @staticmethod
     def _validate_required_columns(
         connection: sqlite3.Connection, required_columns: dict[str, set[str]]
@@ -2777,6 +2996,54 @@ class GroupMemoryDatabase:
                 raise ValueError(
                     f"Database messages index {index_name} is missing or incompatible."
                 )
+
+    @staticmethod
+    def _validate_observed_mention_dedupe_index(
+        connection: sqlite3.Connection,
+    ) -> None:
+        index_name = "idx_relationship_events_observed_mention_dedupe"
+        index_row = next(
+            (
+                row
+                for row in connection.execute(
+                    'PRAGMA index_list("relationship_events")'
+                )
+                if row[1] == index_name
+            ),
+            None,
+        )
+        index_columns = (
+            tuple(
+                row[2]
+                for row in connection.execute(f'PRAGMA index_info("{index_name}")')
+            )
+            if index_row is not None
+            else ()
+        )
+        sql_row = connection.execute(
+            """
+            SELECT sql FROM sqlite_master
+            WHERE type = 'index' AND name = ?
+            """,
+            (index_name,),
+        ).fetchone()
+        sql = "" if sql_row is None or sql_row[0] is None else str(sql_row[0]).lower()
+        required_terms = (
+            "where", "event_type = 'mention'", "source_type = 'observed'",
+            "platform_message_id <> ''", "mention_target_user_id <> ''",
+        )
+        if (
+            index_row is None
+            or not bool(index_row[2])
+            or not bool(index_row[4])
+            or index_columns != (
+                "group_id", "platform_message_id", "mention_target_user_id"
+            )
+            or not all(term in sql for term in required_terms)
+        ):
+            raise ValueError(
+                "Database observed mention deduplication index is missing or incompatible."
+            )
 
     @staticmethod
     def _validate_named_indexes(

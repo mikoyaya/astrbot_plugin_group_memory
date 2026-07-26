@@ -12,7 +12,7 @@
         <div>
           <p class="eyebrow">QQ GROUP MEMORY</p>
           <h1>群成员数据</h1>
-          <p class="subtitle">仅展示已记录过群消息的成员基础资料。</p>
+          <p class="subtitle">展示已发言成员与仅被 @ 提及的基础资料。</p>
         </div>
         <button id="refresh-button" class="icon-button" type="button" title="刷新数据" aria-label="刷新数据">
           <span aria-hidden="true">↻</span>
@@ -38,6 +38,7 @@
               <tr>
                 <th>群</th>
                 <th>成员</th>
+                <th>状态</th>
                 <th>消息数</th>
                 <th>最近消息</th>
                 <th>标签</th>
@@ -64,6 +65,7 @@
         <dl class="detail-grid">
           <div><dt>QQ号</dt><dd id="detail-user-id">-</dd></div>
           <div><dt>昵称</dt><dd id="detail-nickname">-</dd></div>
+          <div><dt>成员状态</dt><dd id="detail-member-status">-</dd></div>
           <div><dt>所属群</dt><dd id="detail-group">-</dd></div>
           <div><dt>消息数</dt><dd id="detail-message-count">-</dd></div>
           <div><dt>最近消息</dt><dd id="detail-last-message">-</dd></div>

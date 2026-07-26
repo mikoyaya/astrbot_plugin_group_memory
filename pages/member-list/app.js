@@ -10,6 +10,7 @@ const dialogClose = document.getElementById("dialog-close");
 const detailStatus = document.getElementById("detail-status");
 const detailUserId = document.getElementById("detail-user-id");
 const detailNickname = document.getElementById("detail-nickname");
+const detailMemberStatus = document.getElementById("detail-member-status");
 const detailGroup = document.getElementById("detail-group");
 const detailMessageCount = document.getElementById("detail-message-count");
 const detailLastMessage = document.getElementById("detail-last-message");
@@ -68,6 +69,23 @@ function tagsFor(member) {
   return text(member.tags).split(",").map((tag) => tag.trim()).filter(Boolean);
 }
 
+function memberStatusLabel(status) {
+  return text(status) === "mentioned_only" ? "仅被提及" : "正常成员";
+}
+
+function eventTypeLabel(eventType) {
+  const labels = {
+    mention: "提及", evaluation: "评价", praise: "夸赞",
+    complaint: "抱怨", reported: "传闻/转述", confirmation: "确认行为",
+  };
+  return labels[text(eventType)] || text(eventType, "未知事件");
+}
+
+function eventSourceLabel(sourceType) {
+  const labels = { observed: "机器人观察", manual: "人工记录", reported: "他人转述" };
+  return labels[text(sourceType)] || text(sourceType, "未知来源");
+}
+
 function sameMember(left, right) {
   const leftId = memberIdentity(left);
   const rightId = memberIdentity(right);
@@ -109,7 +127,14 @@ function createMemberCell(member) {
   name.textContent = member.nickname || `成员 ${member.user_id || member.external_user_id}`;
   const id = document.createElement("span");
   id.textContent = `QQ ${member.user_id || member.external_user_id || "未知"}`;
-  button.append(name, id);
+  button.append(name);
+  if (text(member.member_status) === "mentioned_only") {
+    const badge = document.createElement("span");
+    badge.className = "member-status-badge mentioned-only";
+    badge.textContent = "仅被提及";
+    button.append(badge);
+  }
+  button.append(id);
   button.addEventListener("click", () => openMember(member));
   cell.append(button);
   return cell;
@@ -130,6 +155,8 @@ function render() {
     const row = document.createElement("tr");
     row.append(
       createGroupCell(member), createMemberCell(member),
+      createTextCell(memberStatusLabel(member.member_status),
+        text(member.member_status) === "mentioned_only" ? "status-cell mentioned-only" : "status-cell"),
       createTextCell(String(member.message_count || 0)),
       createTextCell(formatTimestamp(member.last_message_timestamp)),
       createTextCell(tagsFor(member).join("、") || "暂无", "tag-cell"),
@@ -213,10 +240,9 @@ function renderLayeredTags(member) {
 }
 
 function eventLabel(event) {
-  const target = event.target_nickname || event.target_user_id;
-  return target
-    ? `${event.source_nickname || event.source_user_id} → ${target}`
-    : `${event.source_nickname || event.source_user_id}（无目标成员）`;
+  const source = event.source_nickname || event.source_user_id || "未知成员";
+  const target = event.target_nickname || event.target_user_id || "无目标成员";
+  return `发起人：${source}；被提及人：${target}`;
 }
 
 function renderEvents(member) {
@@ -227,8 +253,8 @@ function renderEvents(member) {
     return;
   }
   events.forEach((event) => relationshipEventList.append(recordRow({
-    title: `${event.event_type} · ${eventLabel(event)}`,
-    meta: `${event.content} · ${Math.round(Number(event.confidence || 0) * 100)}% · ${event.source_type} · ${formatTimestamp(event.event_timestamp)}`,
+    title: `${eventTypeLabel(event.event_type)} · ${eventLabel(event)}`,
+    meta: `来源：${eventSourceLabel(event.source_type)}；时间：${formatTimestamp(event.event_timestamp)}；置信度：${Math.round(Number(event.confidence || 0) * 100)}%；证据：${text(event.content, "暂无")}`,
   })));
 }
 
@@ -261,6 +287,7 @@ function renderLegacyTags(member) {
 function renderDetail(member) {
   detailUserId.textContent = member.user_id || member.external_user_id || "-";
   detailNickname.textContent = member.nickname || "未获取昵称";
+  detailMemberStatus.textContent = memberStatusLabel(member.member_status);
   detailGroup.textContent = groupLabel(member);
   detailMessageCount.textContent = String(member.message_count || 0);
   detailLastMessage.textContent = formatTimestamp(member.last_message_timestamp);
