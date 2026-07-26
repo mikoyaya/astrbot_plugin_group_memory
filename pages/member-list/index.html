@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>群成员数据</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <main class="page-shell">
+      <header class="page-header">
+        <div>
+          <p class="eyebrow">QQ GROUP MEMORY</p>
+          <h1>群成员数据</h1>
+          <p class="subtitle">仅展示已记录过群消息的成员基础资料。</p>
+        </div>
+        <button id="refresh-button" class="icon-button" type="button" title="刷新数据" aria-label="刷新数据">
+          <span aria-hidden="true">↻</span>
+        </button>
+      </header>
+
+      <section class="toolbar" aria-label="成员数据筛选">
+        <label class="search-field">
+          <span>筛选成员</span>
+          <input id="search-input" type="search" placeholder="昵称、QQ号、群号、标签或备注" />
+        </label>
+        <p id="summary" class="summary" aria-live="polite">正在加载成员数据…</p>
+      </section>
+
+      <section class="table-region" aria-label="成员列表">
+        <div id="empty-state" class="empty-state" hidden>
+          <strong>暂无已记录成员</strong>
+          <p>机器人收到 QQ 群消息后，成员会自动出现在这里。</p>
+        </div>
+        <div class="table-scroll">
+          <table id="member-table" hidden>
+            <thead>
+              <tr>
+                <th>群</th>
+                <th>成员</th>
+                <th>消息数</th>
+                <th>最近消息</th>
+                <th>标签</th>
+                <th>备注</th>
+              </tr>
+            </thead>
+            <tbody id="member-body"></tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>
