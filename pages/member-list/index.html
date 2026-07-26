@@ -30,6 +30,7 @@
       <nav class="view-tabs" aria-label="数据视图">
         <button id="members-view-button" class="view-tab is-active" type="button">成员列表</button>
         <button id="network-view-button" class="view-tab" type="button">关系网</button>
+        <button id="active-reply-view-button" class="view-tab" type="button">主动回复设置</button>
       </nav>
 
       <section id="members-view" class="table-region" aria-label="成员列表">
@@ -106,6 +107,58 @@
           从成员详情点击“查看关系网”，或在上方搜索中心成员。
         </aside>
       </section>
+
+      <section id="active-reply-view" class="settings-view" aria-label="主动回复设置" hidden>
+        <header class="settings-header">
+          <div>
+            <p class="eyebrow">PROACTIVE REPLY V1</p>
+            <h2>主动回复设置</h2>
+            <p>回复率是主控制；反骚扰只在刷屏、连续 @、连续追问或重复内容时临时压低概率。</p>
+          </div>
+          <button id="active-reply-refresh-button" class="secondary-button" type="button">刷新状态</button>
+        </header>
+        <p id="active-reply-status" class="settings-status" aria-live="polite">请选择已有消息的群。</p>
+        <div class="settings-group-picker">
+          <label class="network-control"><span>当前群</span><select id="active-reply-group-input" aria-label="主动回复设置群"></select></label>
+          <p>设置按“平台 + 群”保存；仅插件管理页面可编辑，不提供普通群成员修改命令。</p>
+        </div>
+        <div id="active-reply-form" class="settings-grid" hidden>
+          <section class="settings-card">
+            <h3>主动回复</h3>
+            <label class="toggle-row"><input id="active-reply-enabled-input" type="checkbox" /><span>启用本群主动回复</span></label>
+            <label class="settings-field"><span>基础回复率</span><input id="active-reply-rate-input" type="number" min="0" max="80" step="1" /><small>每条普通群消息独立抽样；不会使用固定回复冷却。</small></label>
+            <label class="toggle-row"><input id="active-reply-bot-input" type="checkbox" /><span>允许其他机器人消息参与判断</span></label>
+            <label class="settings-field"><span>机器人消息权重</span><input id="active-reply-bot-weight-input" type="number" min="0" max="50" step="1" /><small>默认很低；机器人自身消息永远不会触发或写入关系网。</small></label>
+          </section>
+          <section class="settings-card">
+            <h3>反骚扰保护</h3>
+            <label class="toggle-row"><input id="active-reply-protection-input" type="checkbox" /><span>启用动态保护</span></label>
+            <label class="settings-field"><span>连续触发阈值</span><input id="active-reply-threshold-input" type="number" min="2" max="12" step="1" /><small>达到后才压低回复率；连续 @、追问、刷屏与重复内容会分别计入。</small></label>
+          </section>
+          <section class="settings-card">
+            <h3>黑名单 / 优先响应</h3>
+            <label class="settings-field"><span>黑名单 member_id</span><textarea id="active-reply-blacklist-input" rows="3" placeholder="每行一个 member_id"></textarea><small>命中后不主动回复；不会改变成员档案或关系数据。</small></label>
+            <label class="settings-field"><span>优先响应 member_id</span><textarea id="active-reply-priority-input" rows="3" placeholder="每行一个 member_id"></textarea><small>提高回复率，但仍受反骚扰保护约束。</small></label>
+          </section>
+          <section class="settings-card">
+            <h3>成员级规则</h3>
+            <div class="member-rule-grid">
+              <input id="active-reply-member-id-input" type="number" min="1" step="1" placeholder="member_id" />
+              <input id="active-reply-member-rate-input" type="number" min="0" max="300" step="5" value="100" aria-label="回复率倍率" />
+              <input id="active-reply-member-sensitivity-input" type="number" min="50" max="200" step="5" value="100" aria-label="保护敏感度" />
+              <button id="active-reply-member-save-button" class="secondary-button" type="button">添加/更新</button>
+            </div>
+            <p class="field-help">回复率倍率：100% 为默认。保护敏感度：越高越容易触发动态压制。</p>
+            <div id="active-reply-member-rule-list" class="record-list"></div>
+          </section>
+          <section class="settings-card settings-card-wide">
+            <div class="section-heading"><h3>调试信息</h3><label class="toggle-row compact-toggle"><input id="active-reply-debug-input" type="checkbox" /><span>记录最近判定</span></label></div>
+            <p class="field-help">仅保存在内存中，最多 50 条、保留 1 小时；不保存聊天正文。</p>
+            <div id="active-reply-debug-list" class="record-list"></div>
+          </section>
+        </div>
+        <div class="settings-actions"><button id="active-reply-save-button" class="command-button" type="button">保存本群设置</button></div>
+      </section>
     </main>
 
     <dialog id="member-dialog" class="member-dialog" aria-labelledby="detail-title">
@@ -121,6 +174,7 @@
         <p id="detail-status" class="dialog-status" aria-live="polite"></p>
         <dl class="detail-grid">
           <div><dt>QQ号</dt><dd id="detail-user-id">-</dd></div>
+          <div><dt>统一成员 ID</dt><dd id="detail-member-id">-</dd></div>
           <div><dt>昵称</dt><dd id="detail-nickname">-</dd></div>
           <div><dt>成员状态</dt><dd id="detail-member-status">-</dd></div>
           <div><dt>所属群</dt><dd id="detail-group">-</dd></div>

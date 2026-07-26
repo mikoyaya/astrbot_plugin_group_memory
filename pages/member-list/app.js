@@ -12,8 +12,10 @@ const searchInput = document.getElementById("search-input");
 const summary = document.getElementById("summary");
 const membersViewButton = document.getElementById("members-view-button");
 const networkViewButton = document.getElementById("network-view-button");
+const activeReplyViewButton = document.getElementById("active-reply-view-button");
 const membersView = document.getElementById("members-view");
 const networkView = document.getElementById("network-view");
+const activeReplyView = document.getElementById("active-reply-view");
 const table = document.getElementById("member-table");
 const body = document.getElementById("member-body");
 const emptyState = document.getElementById("empty-state");
@@ -21,6 +23,7 @@ const dialog = document.getElementById("member-dialog");
 const dialogClose = document.getElementById("dialog-close");
 const detailStatus = document.getElementById("detail-status");
 const detailUserId = document.getElementById("detail-user-id");
+const detailMemberId = document.getElementById("detail-member-id");
 const detailNickname = document.getElementById("detail-nickname");
 const detailMemberStatus = document.getElementById("detail-member-status");
 const detailGroup = document.getElementById("detail-group");
@@ -70,6 +73,26 @@ const networkStatus = document.getElementById("network-status");
 const networkCanvas = document.getElementById("network-canvas");
 const networkEmpty = document.getElementById("network-empty");
 const networkTooltip = document.getElementById("network-tooltip");
+const activeReplyRefreshButton = document.getElementById("active-reply-refresh-button");
+const activeReplyStatus = document.getElementById("active-reply-status");
+const activeReplyGroupInput = document.getElementById("active-reply-group-input");
+const activeReplyForm = document.getElementById("active-reply-form");
+const activeReplyEnabledInput = document.getElementById("active-reply-enabled-input");
+const activeReplyRateInput = document.getElementById("active-reply-rate-input");
+const activeReplyProtectionInput = document.getElementById("active-reply-protection-input");
+const activeReplyThresholdInput = document.getElementById("active-reply-threshold-input");
+const activeReplyBotInput = document.getElementById("active-reply-bot-input");
+const activeReplyBotWeightInput = document.getElementById("active-reply-bot-weight-input");
+const activeReplyBlacklistInput = document.getElementById("active-reply-blacklist-input");
+const activeReplyPriorityInput = document.getElementById("active-reply-priority-input");
+const activeReplyMemberIdInput = document.getElementById("active-reply-member-id-input");
+const activeReplyMemberRateInput = document.getElementById("active-reply-member-rate-input");
+const activeReplyMemberSensitivityInput = document.getElementById("active-reply-member-sensitivity-input");
+const activeReplyMemberSaveButton = document.getElementById("active-reply-member-save-button");
+const activeReplyMemberRuleList = document.getElementById("active-reply-member-rule-list");
+const activeReplyDebugInput = document.getElementById("active-reply-debug-input");
+const activeReplyDebugList = document.getElementById("active-reply-debug-list");
+const activeReplySaveButton = document.getElementById("active-reply-save-button");
 const relationshipDialog = document.getElementById("relationship-dialog");
 const relationshipClose = document.getElementById("relationship-close");
 const relationshipSummary = document.getElementById("relationship-summary");
@@ -98,6 +121,9 @@ let networkLayoutSnapshot = null;
 let suppressNetworkNodeClickUntil = 0;
 let memberRelationshipAnalysisToken = 0;
 let networkRelationshipAnalysisToken = 0;
+let activeReplyGroupScopes = new Map();
+let activeReplySettings = null;
+let activeReplyDebug = { entries: [] };
 
 const NETWORK_WIDTH = 980;
 const NETWORK_HEIGHT = 620;
@@ -470,6 +496,7 @@ function renderDetail(member) {
     (left, right) => Number(right.last_time || 0) - Number(left.last_time || 0),
   )[0];
   detailUserId.textContent = member.user_id || member.external_user_id || "-";
+  detailMemberId.textContent = member.member_id ? String(member.member_id) : "-";
   detailNickname.textContent = member.nickname || "未获取昵称";
   detailMemberStatus.textContent = memberStatusLabel(member.member_status);
   detailGroup.textContent = groupLabel(member);
@@ -502,11 +529,15 @@ function renderDetail(member) {
 
 function setView(view) {
   const isNetwork = view === "network";
-  membersView.hidden = isNetwork;
+  const isActiveReply = view === "active-reply";
+  membersView.hidden = isNetwork || isActiveReply;
   networkView.hidden = !isNetwork;
-  membersViewButton.classList.toggle("is-active", !isNetwork);
+  activeReplyView.hidden = !isActiveReply;
+  membersViewButton.classList.toggle("is-active", !isNetwork && !isActiveReply);
   networkViewButton.classList.toggle("is-active", isNetwork);
+  activeReplyViewButton.classList.toggle("is-active", isActiveReply);
   if (isNetwork && networkCenter && !networkLoaded) loadNetwork();
+  if (isActiveReply) loadActiveReplySettings();
 }
 
 function chooseNetworkCenter(member) {
@@ -1703,6 +1734,174 @@ async function addRelationshipEvent() {
   if (!networkView.hidden && networkCenter) loadNetwork();
 }
 
+function activeReplyScopeKey(scope) {
+  return `${scope.platform_id}\u0000${scope.group_id}`;
+}
+
+function activeReplyScope() {
+  return activeReplyGroupScopes.get(activeReplyGroupInput.value) || null;
+}
+
+function populateActiveReplyGroups() {
+  const previous = activeReplyGroupInput.value;
+  activeReplyGroupScopes = new Map();
+  members.forEach((member) => {
+    const scope = { platform_id: text(member.platform_id), group_id: text(member.group_id || member.external_group_id) };
+    if (!scope.platform_id || !scope.group_id) return;
+    const key = activeReplyScopeKey(scope);
+    if (!activeReplyGroupScopes.has(key)) {
+      activeReplyGroupScopes.set(key, { ...scope, label: `${member.group_name || scope.group_id} · ${scope.group_id} · ${scope.platform_id}` });
+    }
+  });
+  activeReplyGroupInput.replaceChildren();
+  [...activeReplyGroupScopes.entries()].sort((left, right) => left[1].label.localeCompare(right[1].label, "zh-CN")).forEach(([key, scope]) => {
+    const option = document.createElement("option");
+    option.value = key;
+    option.textContent = scope.label;
+    activeReplyGroupInput.append(option);
+  });
+  if (activeReplyGroupScopes.has(previous)) activeReplyGroupInput.value = previous;
+  else if (activeReplyGroupInput.options.length) activeReplyGroupInput.selectedIndex = 0;
+  activeReplyForm.hidden = !activeReplyGroupInput.options.length;
+}
+
+function activeReplyMemberIds(value) {
+  return [...new Set(text(value).split(/[\s,，]+/).map((entry) => Number(entry)).filter((entry) => Number.isInteger(entry) && entry > 0))].sort((left, right) => left - right);
+}
+
+function activeReplyPercent(value, fallback, { minimum = 0, maximum = 300 } = {}) {
+  const number = Number(value);
+  return Number.isFinite(number) ? Math.min(Math.max(number, minimum), maximum) / 100 : fallback;
+}
+
+function renderActiveReplyMemberRules() {
+  activeReplyMemberRuleList.replaceChildren();
+  const overrides = activeReplySettings?.member_overrides || {};
+  const entries = Object.entries(overrides).sort((left, right) => Number(left[0]) - Number(right[0]));
+  if (!entries.length) {
+    activeReplyMemberRuleList.append(recordRow({ title: "暂无成员级覆盖", meta: "默认使用本群回复率与保护规则。" }));
+    return;
+  }
+  entries.forEach(([memberId, rule]) => activeReplyMemberRuleList.append(recordRow({
+    title: `member_id ${memberId}`,
+    meta: `回复率 ${Math.round(Number(rule.reply_rate_multiplier || 1) * 100)}% · 保护敏感度 ${Math.round(Number(rule.anti_spam_sensitivity || 1) * 100)}%`,
+    removeTitle: `删除成员规则 ${memberId}`,
+    onRemove: () => {
+      delete activeReplySettings.member_overrides[memberId];
+      renderActiveReplyMemberRules();
+      activeReplyStatus.textContent = "成员级规则已修改，点击“保存本群设置”生效。";
+    },
+  })));
+}
+
+function renderActiveReplyDebug() {
+  activeReplyDebugList.replaceChildren();
+  const entries = Array.isArray(activeReplyDebug?.entries) ? activeReplyDebug.entries : [];
+  if (!entries.length) {
+    activeReplyDebugList.append(recordRow({ title: "暂无调试记录", meta: "启用记录后，新的群消息会在这里显示是否触发及其原因。" }));
+    return;
+  }
+  entries.forEach((entry) => {
+    const protection = Array.isArray(entry.protection_reasons) && entry.protection_reasons.length
+      ? `保护：${entry.protection_reasons.join("、")}` : "保护：未触发";
+    const flags = [entry.blacklisted ? "黑名单" : "", entry.prioritized ? "优先响应" : "", entry.bot_message ? "机器人消息" : ""].filter(Boolean).join(" · ");
+    activeReplyDebugList.append(recordRow({
+      title: `${entry.triggered ? "已触发" : "未触发"} · ${entry.reason || "未知原因"}`,
+      meta: `${formatTimestamp(entry.timestamp)} · 当前回复率 ${Math.round(Number(entry.effective_reply_rate || 0) * 100)}% · ${protection}${flags ? ` · ${flags}` : ""}`,
+    }));
+  });
+}
+
+function renderActiveReplySettings(result) {
+  activeReplySettings = result?.settings && typeof result.settings === "object" ? structuredClone(result.settings) : null;
+  activeReplyDebug = result?.debug && typeof result.debug === "object" ? result.debug : { entries: [] };
+  if (!activeReplySettings) return;
+  activeReplyEnabledInput.checked = Boolean(activeReplySettings.enabled);
+  activeReplyRateInput.value = String(Math.round(Number(activeReplySettings.base_reply_rate || 0) * 100));
+  activeReplyProtectionInput.checked = Boolean(activeReplySettings.anti_spam_enabled);
+  activeReplyThresholdInput.value = String(activeReplySettings.consecutive_trigger_threshold || 3);
+  activeReplyBotInput.checked = Boolean(activeReplySettings.bot_message_participation);
+  activeReplyBotWeightInput.value = String(Math.round(Number(activeReplySettings.bot_message_weight || 0) * 100));
+  activeReplyBlacklistInput.value = (activeReplySettings.blacklist_member_ids || []).join("\n");
+  activeReplyPriorityInput.value = (activeReplySettings.priority_member_ids || []).join("\n");
+  activeReplyDebugInput.checked = Boolean(activeReplySettings.debug_log_enabled);
+  renderActiveReplyMemberRules();
+  renderActiveReplyDebug();
+}
+
+function readActiveReplySettings() {
+  const settings = activeReplySettings && typeof activeReplySettings === "object" ? structuredClone(activeReplySettings) : {};
+  settings.enabled = activeReplyEnabledInput.checked;
+  settings.base_reply_rate = activeReplyPercent(activeReplyRateInput.value, 0.12, { maximum: 80 });
+  settings.anti_spam_enabled = activeReplyProtectionInput.checked;
+  settings.consecutive_trigger_threshold = Math.min(Math.max(Number(activeReplyThresholdInput.value) || 3, 2), 12);
+  settings.bot_message_participation = activeReplyBotInput.checked;
+  settings.bot_message_weight = activeReplyPercent(activeReplyBotWeightInput.value, 0.15, { maximum: 50 });
+  settings.blacklist_member_ids = activeReplyMemberIds(activeReplyBlacklistInput.value);
+  settings.priority_member_ids = activeReplyMemberIds(activeReplyPriorityInput.value);
+  settings.member_overrides = settings.member_overrides || {};
+  settings.debug_log_enabled = activeReplyDebugInput.checked;
+  return settings;
+}
+
+async function loadActiveReplySettings() {
+  populateActiveReplyGroups();
+  const scope = activeReplyScope();
+  if (!scope) {
+    activeReplyForm.hidden = true;
+    activeReplyStatus.textContent = "暂无已记录群消息；收到普通群消息后可配置本群。";
+    return;
+  }
+  activeReplyRefreshButton.disabled = true;
+  activeReplyStatus.textContent = "正在读取本群主动回复设置…";
+  try {
+    const result = await bridge.apiGet("active-reply/settings", scope);
+    renderActiveReplySettings(result);
+    activeReplyForm.hidden = false;
+    activeReplyStatus.textContent = result.settings?.enabled ? "本群主动回复已启用。" : "本群主动回复当前关闭；保存并启用后才会开始判定。";
+  } catch (error) {
+    activeReplyForm.hidden = true;
+    activeReplyStatus.textContent = error.message || "读取主动回复设置失败";
+  } finally {
+    activeReplyRefreshButton.disabled = false;
+  }
+}
+
+function saveActiveReplyMemberRule() {
+  const memberId = Number(activeReplyMemberIdInput.value);
+  if (!Number.isInteger(memberId) || memberId <= 0) {
+    activeReplyStatus.textContent = "请输入有效 member_id。";
+    return;
+  }
+  if (!activeReplySettings) activeReplySettings = { member_overrides: {} };
+  activeReplySettings.member_overrides = activeReplySettings.member_overrides || {};
+  activeReplySettings.member_overrides[String(memberId)] = {
+    reply_rate_multiplier: activeReplyPercent(activeReplyMemberRateInput.value, 1, { maximum: 300 }),
+    anti_spam_sensitivity: activeReplyPercent(activeReplyMemberSensitivityInput.value, 1, { minimum: 50, maximum: 200 }),
+  };
+  activeReplyMemberIdInput.value = "";
+  activeReplyMemberRateInput.value = "100";
+  activeReplyMemberSensitivityInput.value = "100";
+  renderActiveReplyMemberRules();
+  activeReplyStatus.textContent = "成员级规则已修改，点击“保存本群设置”生效。";
+}
+
+async function saveActiveReplySettings() {
+  const scope = activeReplyScope();
+  if (!scope) return;
+  activeReplySaveButton.disabled = true;
+  activeReplyStatus.textContent = "正在保存本群主动回复设置…";
+  try {
+    const result = await bridge.apiPost("active-reply/settings", { ...scope, settings: readActiveReplySettings() });
+    renderActiveReplySettings(result);
+    activeReplyStatus.textContent = "已保存。本群的新消息会立即使用最新设置。";
+  } catch (error) {
+    activeReplyStatus.textContent = error.message || "保存主动回复设置失败";
+  } finally {
+    activeReplySaveButton.disabled = false;
+  }
+}
+
 async function loadMembers() {
   refreshButton.disabled = true;
   summary.textContent = "正在刷新成员数据…";
@@ -1710,6 +1909,7 @@ async function loadMembers() {
     const result = await bridge.apiGet("members");
     members = Array.isArray(result.members) ? result.members : [];
     render();
+    if (!activeReplyView.hidden) loadActiveReplySettings();
   } catch (error) {
     members = [];
     table.hidden = true;
@@ -1725,6 +1925,7 @@ refreshButton.addEventListener("click", loadMembers);
 searchInput.addEventListener("input", render);
 membersViewButton.addEventListener("click", () => setView("members"));
 networkViewButton.addEventListener("click", () => setView("network"));
+activeReplyViewButton.addEventListener("click", () => setView("active-reply"));
 openNetworkButton.addEventListener("click", () => {
   if (selectedMember) chooseNetworkCenter(selectedMember);
 });
@@ -1744,6 +1945,10 @@ networkLowRelevanceButton.addEventListener("click", () => {
   applyNetworkVisibility();
 });
 networkResetViewButton.addEventListener("click", resetNetworkView);
+activeReplyRefreshButton.addEventListener("click", loadActiveReplySettings);
+activeReplyGroupInput.addEventListener("change", loadActiveReplySettings);
+activeReplyMemberSaveButton.addEventListener("click", saveActiveReplyMemberRule);
+activeReplySaveButton.addEventListener("click", saveActiveReplySettings);
 function reloadNetworkForNewContext() {
   networkExpanded = false;
   networkLayoutSnapshot = null;

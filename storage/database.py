@@ -350,6 +350,27 @@ class GroupMemoryDatabase:
             )
         )
 
+    def get_member_id(
+        self,
+        *,
+        platform_id: str,
+        external_group_id: str,
+        external_user_id: str,
+    ) -> int:
+        """Return the canonical group-scoped member ID with a small indexed read."""
+        return self._run_with_retry(
+            lambda connection: self._member_context(
+                connection,
+                platform_id=self._require_identifier("platform_id", platform_id),
+                external_group_id=self._require_identifier(
+                    "external_group_id", external_group_id
+                ),
+                external_user_id=self._require_identifier(
+                    "external_user_id", external_user_id
+                ),
+            )[2]
+        )
+
     def list_member_overview(self, limit: int | None = None) -> list[dict[str, object]]:
         """Return recent group-member data for the plugin Page."""
         requested_limit = (
