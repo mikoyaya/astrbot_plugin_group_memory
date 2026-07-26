@@ -88,9 +88,9 @@ function text(value, fallback = "") {
 }
 
 function formatTimestamp(timestamp) {
-  if (!timestamp) return "??";
+  if (!timestamp) return "暂无";
   const date = new Date(Number(timestamp) * 1000);
-  if (Number.isNaN(date.getTime())) return "??";
+  if (Number.isNaN(date.getTime())) return "未知";
   return new Intl.DateTimeFormat("zh-CN", {
     year: "numeric", month: "2-digit", day: "2-digit",
     hour: "2-digit", minute: "2-digit", hour12: false,
@@ -111,32 +111,32 @@ function tagsFor(member) {
 }
 
 function memberStatusLabel(status) {
-  return text(status) === "mentioned_only" ? "????" : "????";
+  return text(status) === "mentioned_only" ? "仅被提及" : "正常成员";
 }
 
 function eventTypeLabel(eventType) {
   const labels = {
-    mention: "??", evaluation: "??", praise: "??",
-    complaint: "??", reported: "??/??", confirmation: "????",
+    mention: "提及", evaluation: "评价", praise: "夸赞",
+    complaint: "抱怨", reported: "传闻/转述", confirmation: "确认行为",
   };
-  return labels[text(eventType)] || text(eventType, "????");
+  return labels[text(eventType)] || text(eventType, "未知事件");
 }
 
 function eventSourceLabel(sourceType) {
-  const labels = { observed: "?????", manual: "????", reported: "????" };
-  return labels[text(sourceType)] || text(sourceType, "????");
+  const labels = { observed: "机器人观察", manual: "人工记录", reported: "他人转述" };
+  return labels[text(sourceType)] || text(sourceType, "未知来源");
 }
 
 function aggregateLabel(aggregate) {
-  const source = aggregate.source?.nickname || aggregate.source?.user_id || "????";
-  const target = aggregate.target?.nickname || aggregate.target?.user_id || "?????";
-  return `${source} ? ${target} x${aggregate.count}`;
+  const source = aggregate.source?.nickname || aggregate.source?.user_id || "未知成员";
+  const target = aggregate.target?.nickname || aggregate.target?.user_id || "无目标成员";
+  return `${source} → ${target} x${aggregate.count}`;
 }
 
 function sourceCountsLabel(sourceCounts) {
   const entries = Object.entries(sourceCounts || {});
-  if (!entries.length) return "????";
-  return entries.map(([source, count]) => `${eventSourceLabel(source)} ${count}`).join("?");
+  if (!entries.length) return "暂无来源";
+  return entries.map(([source, count]) => `${eventSourceLabel(source)} ${count}`).join("；");
 }
 
 function sameMember(left, right) {
@@ -148,8 +148,8 @@ function sameMember(left, right) {
 }
 
 function groupLabel(member) {
-  const groupId = member.group_id || member.external_group_id || "????";
-  return member.group_name ? `${member.group_name} (${groupId})` : `?? ${groupId}`;
+  const groupId = member.group_id || member.external_group_id || "未知群号";
+  return member.group_name ? `${member.group_name} (${groupId})` : `群号 ${groupId}`;
 }
 
 function createTextCell(value, className = "") {
@@ -163,9 +163,9 @@ function createGroupCell(member) {
   const cell = document.createElement("td");
   cell.className = "group-cell";
   const name = document.createElement("strong");
-  name.textContent = member.group_name || "????";
+  name.textContent = member.group_name || "未命名群";
   const id = document.createElement("span");
-  id.textContent = `?? ${member.group_id || member.external_group_id || "??"}`;
+  id.textContent = `群号 ${member.group_id || member.external_group_id || "未知"}`;
   cell.append(name, id);
   return cell;
 }
@@ -175,16 +175,16 @@ function createMemberCell(member) {
   const button = document.createElement("button");
   button.className = "member-link";
   button.type = "button";
-  button.title = `?? ${member.nickname || member.user_id || member.external_user_id} ???`;
+  button.title = `查看 ${member.nickname || member.user_id || member.external_user_id} 的详情`;
   const name = document.createElement("strong");
-  name.textContent = member.nickname || `?? ${member.user_id || member.external_user_id}`;
+  name.textContent = member.nickname || `成员 ${member.user_id || member.external_user_id}`;
   const id = document.createElement("span");
-  id.textContent = `QQ ${member.user_id || member.external_user_id || "??"}`;
+  id.textContent = `QQ ${member.user_id || member.external_user_id || "未知"}`;
   button.append(name);
   if (text(member.member_status) === "mentioned_only") {
     const badge = document.createElement("span");
     badge.className = "member-status-badge mentioned-only";
-    badge.textContent = "????";
+    badge.textContent = "仅被提及";
     button.append(badge);
   }
   button.append(id);
@@ -213,15 +213,15 @@ function render() {
         text(member.member_status) === "mentioned_only" ? "status-cell mentioned-only" : "status-cell"),
       createTextCell(String(member.message_count || 0)),
       createTextCell(formatTimestamp(member.last_message_timestamp)),
-      createTextCell(tagsFor(member).join("?") || "??", "tag-cell"),
-      createTextCell(member.note || "??", "note-cell"),
+      createTextCell(tagsFor(member).join("、") || "暂无", "tag-cell"),
+      createTextCell(member.note || "暂无", "note-cell"),
     );
     body.append(row);
   }
   table.hidden = filtered.length === 0;
   emptyState.hidden = filtered.length !== 0;
   summary.textContent = members.length === 0
-    ? "???????" : `?? ${filtered.length} / ${members.length} ???`;
+    ? "暂无已记录成员" : `显示 ${filtered.length} / ${members.length} 名成员`;
 }
 
 function controls() {
@@ -256,7 +256,7 @@ function recordRow({ title, meta = "", removeTitle, onRemove }) {
     remove.className = "record-remove";
     remove.title = removeTitle;
     remove.setAttribute("aria-label", removeTitle);
-    remove.textContent = "?";
+    remove.textContent = "×";
     remove.addEventListener("click", onRemove);
     row.append(remove);
   }
@@ -267,13 +267,13 @@ function renderAliases(member) {
   aliasList.replaceChildren();
   const aliases = Array.isArray(member.aliases) ? member.aliases : [];
   if (!aliases.length) {
-    aliasList.append(recordRow({ title: "????", meta: "???????????" }));
+    aliasList.append(recordRow({ title: "暂无别名", meta: "收到新昵称后会自动记录" }));
     return;
   }
   aliases.forEach((alias) => aliasList.append(recordRow({
     title: alias.alias,
-    meta: `${alias.alias_type} ? ${Math.round(Number(alias.confidence || 0) * 100)}% ? ${alias.source_type}`,
-    removeTitle: `???? ${alias.alias}`,
+    meta: `${alias.alias_type} · ${Math.round(Number(alias.confidence || 0) * 100)}% · ${alias.source_type}`,
+    removeTitle: `删除别名 ${alias.alias}`,
     onRemove: () => removeAlias(alias.id),
   })));
 }
@@ -282,21 +282,21 @@ function renderLayeredTags(member) {
   layeredTagList.replaceChildren();
   const tags = Array.isArray(member.layered_tags) ? member.layered_tags : [];
   if (!tags.length) {
-    layeredTagList.append(recordRow({ title: "??????", meta: "???????????????" }));
+    layeredTagList.append(recordRow({ title: "暂无分层标签", meta: "人工标签与机器人观察会明确区分" }));
     return;
   }
   tags.forEach((tag) => layeredTagList.append(recordRow({
     title: tag.name,
-    meta: `${tag.layer} ? ${Math.round(Number(tag.confidence || 0) * 100)}% ? ${tag.source_type}`,
-    removeTitle: `???? ${tag.name}`,
+    meta: `${tag.layer} · ${Math.round(Number(tag.confidence || 0) * 100)}% · ${tag.source_type}`,
+    removeTitle: `删除标签 ${tag.name}`,
     onRemove: tag.id ? () => removeLayeredTag(tag.id) : null,
   })));
 }
 
 function eventLabel(event) {
-  const source = event.source_nickname || event.source_user_id || "????";
-  const target = event.target_nickname || event.target_user_id || "?????";
-  return `????${source}??????${target}`;
+  const source = event.source_nickname || event.source_user_id || "未知成员";
+  const target = event.target_nickname || event.target_user_id || "无目标成员";
+  return `发起人：${source}；被提及人：${target}`;
 }
 
 function renderEvents(member) {
@@ -304,13 +304,13 @@ function renderEvents(member) {
   const aggregates = Array.isArray(member.relationship_aggregates)
     ? member.relationship_aggregates : [];
   if (!aggregates.length) {
-    relationshipEventList.append(recordRow({ title: "??????", meta: "??????????????? @??" }));
+    relationshipEventList.append(recordRow({ title: "暂无关系事件", meta: "可人工记录，也会保存唯一明确的 @提及" }));
     return;
   }
   aggregates.forEach((aggregate) => {
     const row = recordRow({
-      title: `${eventTypeLabel(aggregate.event_type)} ? ${aggregateLabel(aggregate)}`,
-      meta: `???${sourceCountsLabel(aggregate.source_counts)}????${formatTimestamp(aggregate.first_time)}????${formatTimestamp(aggregate.last_time)}??????${text(aggregate.last_evidence, "??")}`,
+      title: `${eventTypeLabel(aggregate.event_type)} · ${aggregateLabel(aggregate)}`,
+      meta: `来源：${sourceCountsLabel(aggregate.source_counts)}；首次：${formatTimestamp(aggregate.first_time)}；最近：${formatTimestamp(aggregate.last_time)}；最后证据：${text(aggregate.last_evidence, "暂无")}`,
     });
     row.classList.add("interactive-record");
     row.tabIndex = 0;
@@ -331,7 +331,7 @@ function renderLegacyTags(member) {
   if (!tags.length) {
     const empty = document.createElement("span");
     empty.className = "muted-text";
-    empty.textContent = "????";
+    empty.textContent = "暂无标签";
     detailTagList.append(empty);
     return;
   }
@@ -342,9 +342,9 @@ function renderLegacyTags(member) {
     label.textContent = tagName;
     const remove = document.createElement("button");
     remove.type = "button";
-    remove.title = `???? ${tagName}`;
-    remove.setAttribute("aria-label", `???? ${tagName}`);
-    remove.textContent = "?";
+    remove.title = `删除标签 ${tagName}`;
+    remove.setAttribute("aria-label", `删除标签 ${tagName}`);
+    remove.textContent = "×";
     remove.addEventListener("click", () => removeTag(tagName));
     tag.append(label, remove);
     detailTagList.append(tag);
@@ -361,20 +361,20 @@ function renderDetail(member) {
     (left, right) => Number(right.last_time || 0) - Number(left.last_time || 0),
   )[0];
   detailUserId.textContent = member.user_id || member.external_user_id || "-";
-  detailNickname.textContent = member.nickname || "?????";
+  detailNickname.textContent = member.nickname || "未获取昵称";
   detailMemberStatus.textContent = memberStatusLabel(member.member_status);
   detailGroup.textContent = groupLabel(member);
   detailMessageCount.textContent = String(member.message_count || 0);
   detailLastMessage.textContent = formatTimestamp(member.last_message_timestamp);
-  detailProfile.textContent = member.summary || "??";
-  detailNoteSummary.textContent = member.note || "??";
-  detailTagsSummary.textContent = tagsFor(member).join("?") || "??";
+  detailProfile.textContent = member.summary || "暂无";
+  detailNoteSummary.textContent = member.note || "暂无";
+  detailTagsSummary.textContent = tagsFor(member).join("、") || "暂无";
   detailRelationshipCount.textContent = aggregates.length
-    ? `${aggregates.length} ????? ? ${totalInteractions} ???`
-    : "??";
+    ? `${aggregates.length} 条聚合关系 · ${totalInteractions} 次互动`
+    : "暂无";
   detailRecentInteraction.textContent = mostRecent
-    ? `${eventTypeLabel(mostRecent.event_type)} ? ${aggregateLabel(mostRecent)} ? ${formatTimestamp(mostRecent.last_time)}${mostRecent.last_evidence ? ` ? ${text(mostRecent.last_evidence).slice(0, 48)}` : ""}`
-    : "??";
+    ? `${eventTypeLabel(mostRecent.event_type)} · ${aggregateLabel(mostRecent)} · ${formatTimestamp(mostRecent.last_time)}${mostRecent.last_evidence ? ` · ${text(mostRecent.last_evidence).slice(0, 48)}` : ""}`
+    : "暂无";
   noteInput.value = member.note || "";
   renderLegacyTags(member);
   renderAliases(member);
@@ -417,7 +417,7 @@ function renderCenterResults() {
   matches.forEach((member) => {
     const button = document.createElement("button");
     button.type = "button";
-    button.textContent = `${member.nickname || "?????"} ? QQ ${member.user_id || member.external_user_id}`;
+    button.textContent = `${member.nickname || "未命名成员"} · QQ ${member.user_id || member.external_user_id}`;
     button.addEventListener("click", () => chooseNetworkCenter(member));
     networkCenterResults.append(button);
   });
@@ -426,7 +426,7 @@ function renderCenterResults() {
 
 async function loadNetwork() {
   if (!networkCenter) {
-    networkStatus.textContent = "???????????????";
+    networkStatus.textContent = "请选择一名成员作为关系网中心。";
     networkEmpty.hidden = false;
     networkCanvas.replaceChildren();
     networkGraph = null;
@@ -434,7 +434,7 @@ async function loadNetwork() {
     return;
   }
   networkLoadButton.disabled = true;
-  networkStatus.textContent = "????????";
+  networkStatus.textContent = "正在加载关系网…";
   try {
     const parameters = {
       ...networkCenter,
@@ -452,7 +452,7 @@ async function loadNetwork() {
     networkGraph = null;
     hideNetworkTooltip();
     networkEmpty.hidden = false;
-    networkStatus.textContent = error.message || "???????";
+    networkStatus.textContent = error.message || "读取关系网失败";
   } finally {
     networkLoadButton.disabled = false;
   }
@@ -499,7 +499,7 @@ function escapeSelectorValue(value) {
 }
 
 function memberDisplayName(member) {
-  return member?.label || member?.nickname || member?.user_id || member?.external_user_id || "?????";
+  return member?.label || member?.nickname || member?.user_id || member?.external_user_id || "未命名成员";
 }
 
 function edgeMember(edge, role) {
@@ -519,20 +519,20 @@ function edgeTooltip(edge) {
   const source = edgeMember(edge, "source");
   const target = edgeMember(edge, "target");
   return [
-    `${eventTypeLabel(edge.event_type)} ? x${edge.count || 0}`,
-    `${memberDisplayName(source)} ? ${memberDisplayName(target)}`,
-    `???${formatTimestamp(edge.last_time)}`,
-    `???${sourceCountsLabel(edge.source_counts)}`,
+    `${eventTypeLabel(edge.event_type)} · x${edge.count || 0}`,
+    `${memberDisplayName(source)} → ${memberDisplayName(target)}`,
+    `最近：${formatTimestamp(edge.last_time)}`,
+    `来源：${sourceCountsLabel(edge.source_counts)}`,
   ].join("\n");
 }
 
 function nodeTooltip(node, edges) {
-  const identity = node.user_id || node.external_user_id || "??";
+  const identity = node.user_id || node.external_user_id || "暂无";
   return [
     memberDisplayName(node),
-    `QQ?${identity}`,
-    `???${memberStatusLabel(node.member_status)}`,
-    `?????${memberRelationshipCount(node.member_id, edges)} ?`,
+    `QQ：${identity}`,
+    `状态：${memberStatusLabel(node.member_status)}`,
+    `关联互动：${memberRelationshipCount(node.member_id, edges)} 次`,
   ].join("\n");
 }
 
@@ -729,8 +729,8 @@ function renderNetwork(network) {
   networkEmpty.hidden = nodes.length > 0;
   networkExpandButton.hidden = !(network.has_more_nodes || network.has_more_edges) || networkExpanded;
   networkStatus.textContent = nodes.length
-    ? `?? ${nodes.length} ????${edges.length} ?????${network.has_more_nodes || network.has_more_edges ? "??????" : ""}?`
-    : "???????????????????";
+    ? `显示 ${nodes.length} 个成员、${edges.length} 条聚合关系${network.has_more_nodes || network.has_more_edges ? "；可展开更多" : ""}。`
+    : "该范围内暂无带明确目标成员的关系事件。";
   if (!nodes.length) return;
 
   const defs = svgElement("defs");
@@ -821,13 +821,13 @@ function renderNetwork(network) {
 function renderAggregateSummary(aggregate) {
   relationshipSummary.replaceChildren();
   const fields = [
-    ["??", `${aggregate.source?.nickname || aggregate.source?.user_id || "????"} ? ${aggregate.target?.nickname || aggregate.target?.user_id || "?????"}`],
-    ["??", eventTypeLabel(aggregate.event_type)],
-    ["??", `x${aggregate.count}`],
-    ["??", formatTimestamp(aggregate.first_time)],
-    ["??", formatTimestamp(aggregate.last_time)],
-    ["??", sourceCountsLabel(aggregate.source_counts)],
-    ["????", text(aggregate.last_evidence, "??")],
+    ["关系", `${aggregate.source?.nickname || aggregate.source?.user_id || "未知成员"} → ${aggregate.target?.nickname || aggregate.target?.user_id || "无目标成员"}`],
+    ["类型", eventTypeLabel(aggregate.event_type)],
+    ["数量", `x${aggregate.count}`],
+    ["首次", formatTimestamp(aggregate.first_time)],
+    ["最近", formatTimestamp(aggregate.last_time)],
+    ["来源", sourceCountsLabel(aggregate.source_counts)],
+    ["最后证据", text(aggregate.last_evidence, "暂无")],
   ];
   fields.forEach(([label, value]) => {
     const item = document.createElement("div");
@@ -862,14 +862,14 @@ async function loadAggregateEvidence(append = false) {
     if (!append) relationshipEvidenceList.replaceChildren();
     const events = Array.isArray(result.events) ? result.events : [];
     events.forEach((event) => relationshipEvidenceList.append(recordRow({
-      title: `${eventTypeLabel(event.event_type)} ? ${event.source_nickname || event.source_user_id} ? ${event.target_nickname || event.target_user_id || "?????"}`,
-      meta: `???${eventSourceLabel(event.source_type)}????${formatTimestamp(event.event_timestamp)}?????${Math.round(Number(event.confidence || 0) * 100)}%????${event.content}`,
+      title: `${eventTypeLabel(event.event_type)} · ${event.source_nickname || event.source_user_id} → ${event.target_nickname || event.target_user_id || "无目标成员"}`,
+      meta: `来源：${eventSourceLabel(event.source_type)}；时间：${formatTimestamp(event.event_timestamp)}；置信度：${Math.round(Number(event.confidence || 0) * 100)}%；证据：${event.content}`,
     })));
-    if (!events.length && !append) relationshipEvidenceList.append(recordRow({ title: "??????????" }));
+    if (!events.length && !append) relationshipEvidenceList.append(recordRow({ title: "暂无可读取的原始证据" }));
     evidenceCursor = result.next_cursor || null;
     relationshipMoreButton.hidden = !evidenceCursor;
   } catch (error) {
-    if (!append) relationshipEvidenceList.replaceChildren(recordRow({ title: "????????", meta: error.message || "?????" }));
+    if (!append) relationshipEvidenceList.replaceChildren(recordRow({ title: "读取原始证据失败", meta: error.message || "请稍后重试" }));
   } finally {
     relationshipMoreButton.disabled = false;
   }
@@ -902,13 +902,13 @@ async function openMember(member) {
   selectedMember = member;
   renderDetail(member);
   if (!dialog.open) dialog.showModal();
-  setDialogBusy(true, "?????????");
+  setDialogBusy(true, "正在读取成员详情…");
   try {
     const result = await requestMemberDetail(member);
     syncMember(result.member);
     detailStatus.textContent = "";
   } catch (error) {
-    detailStatus.textContent = error.message || "????????";
+    detailStatus.textContent = error.message || "读取成员详情失败";
   } finally {
     setDialogBusy(false, detailStatus.textContent);
   }
@@ -928,7 +928,7 @@ async function runMutation(message, operation, successMessage) {
     await operation();
     await refreshSelectedMember(successMessage);
   } catch (error) {
-    detailStatus.textContent = error.message || "????";
+    detailStatus.textContent = error.message || "保存失败";
   } finally {
     setDialogBusy(false, detailStatus.textContent);
   }
@@ -937,56 +937,56 @@ async function runMutation(message, operation, successMessage) {
 function readConfidence(input) {
   const value = Number(input.value);
   if (!Number.isFinite(value) || value < 0 || value > 1) {
-    throw new Error("?????? 0 ? 1 ??");
+    throw new Error("置信度必须在 0 到 1 之间");
   }
   return value;
 }
 
 async function saveNote() {
   const content = noteInput.value.trim();
-  if (!content) return void (detailStatus.textContent = "??????");
-  await runMutation("???????", () => bridge.apiPost("member/note", {
+  if (!content) return void (detailStatus.textContent = "备注不能为空");
+  await runMutation("正在保存备注…", () => bridge.apiPost("member/note", {
     ...memberIdentity(selectedMember), content,
-  }), "?????");
+  }), "备注已保存");
 }
 
 async function addTag() {
   const tagName = tagInput.value.trim();
-  if (!tagName) return void (detailStatus.textContent = "?????");
-  await runMutation("???????", async () => {
+  if (!tagName) return void (detailStatus.textContent = "请输入标签");
+  await runMutation("正在添加标签…", async () => {
     await bridge.apiPost("member/tags/add", { ...memberIdentity(selectedMember), tag_name: tagName });
     tagInput.value = "";
-  }, "?????");
+  }, "标签已添加");
 }
 
 async function removeTag(tagName) {
-  await runMutation("???????", () => bridge.apiPost("member/tags/remove", {
+  await runMutation("正在删除标签…", () => bridge.apiPost("member/tags/remove", {
     ...memberIdentity(selectedMember), tag_name: tagName,
-  }), "?????");
+  }), "标签已删除");
 }
 
 async function addAlias() {
   const alias = aliasInput.value.trim();
-  if (!alias) return void (detailStatus.textContent = "?????");
-  await runMutation("???????", async () => {
+  if (!alias) return void (detailStatus.textContent = "请输入别名");
+  await runMutation("正在添加别名…", async () => {
     await bridge.apiPost("member/aliases/add", {
       ...memberIdentity(selectedMember), alias, alias_type: aliasTypeInput.value, confidence: 1,
     });
     aliasInput.value = "";
-  }, "?????");
+  }, "别名已添加");
 }
 
 async function removeAlias(aliasId) {
-  await runMutation("???????", () => bridge.apiPost("member/aliases/remove", {
+  await runMutation("正在删除别名…", () => bridge.apiPost("member/aliases/remove", {
     ...memberIdentity(selectedMember), alias_id: aliasId,
-  }), "?????");
+  }), "别名已删除");
 }
 
 async function mergeMember() {
   const targetUserId = mergeTargetInput.value.trim();
-  if (!targetUserId) return void (detailStatus.textContent = "??????? QQ ?");
-  if (!window.confirm("???????????????????????????????")) return;
-  setDialogBusy(true, "?????????");
+  if (!targetUserId) return void (detailStatus.textContent = "请输入目标成员 QQ 号");
+  if (!window.confirm("合并后来源身份会重定向到目标身份，历史消息不会删除。确认继续？")) return;
+  setDialogBusy(true, "正在合并成员身份…");
   try {
     await bridge.apiPost("member/merge", {
       ...memberIdentity(selectedMember), target_user_id: targetUserId, reason: mergeReasonInput.value.trim(),
@@ -994,9 +994,9 @@ async function mergeMember() {
     mergeTargetInput.value = "";
     mergeReasonInput.value = "";
     await loadMembers();
-    await refreshSelectedMember("?????????????????");
+    await refreshSelectedMember("身份已合并，历史消息已归入目标身份");
   } catch (error) {
-    detailStatus.textContent = error.message || "????????";
+    detailStatus.textContent = error.message || "合并成员身份失败";
   } finally {
     setDialogBusy(false, detailStatus.textContent);
   }
@@ -1004,46 +1004,46 @@ async function mergeMember() {
 
 async function addLayeredTag() {
   const tagName = layeredTagInput.value.trim();
-  if (!tagName) return void (detailStatus.textContent = "???????");
+  if (!tagName) return void (detailStatus.textContent = "请输入分层标签");
   let confidence;
   try { confidence = readConfidence(tagConfidenceInput); }
   catch (error) { detailStatus.textContent = error.message; return; }
-  await runMutation("?????????", async () => {
+  await runMutation("正在添加分层标签…", async () => {
     await bridge.apiPost("member/layered-tags/add", {
       ...memberIdentity(selectedMember), tag_name: tagName, layer: tagLayerInput.value,
       confidence, source_type: "manual",
     });
     layeredTagInput.value = "";
-  }, "???????");
+  }, "分层标签已保存");
 }
 
 async function removeLayeredTag(tagId) {
-  await runMutation("?????????", () => bridge.apiPost("member/layered-tags/remove", {
+  await runMutation("正在删除分层标签…", () => bridge.apiPost("member/layered-tags/remove", {
     ...memberIdentity(selectedMember), tag_id: tagId,
-  }), "???????");
+  }), "分层标签已删除");
 }
 
 async function addRelationshipEvent() {
   const content = eventContentInput.value.trim();
-  if (!content) return void (detailStatus.textContent = "???????");
+  if (!content) return void (detailStatus.textContent = "请输入事件内容");
   let confidence;
   try { confidence = readConfidence(eventConfidenceInput); }
   catch (error) { detailStatus.textContent = error.message; return; }
-  await runMutation("?????????", async () => {
+  await runMutation("正在记录关系事件…", async () => {
     await bridge.apiPost("relationship-events", {
       ...memberIdentity(selectedMember), target_user_id: eventTargetInput.value.trim(),
       event_type: eventTypeInput.value, content, confidence, source_type: "manual",
     });
     eventTargetInput.value = "";
     eventContentInput.value = "";
-  }, "???????");
+  }, "关系事件已记录");
   networkData = null;
   if (!networkView.hidden && networkCenter) loadNetwork();
 }
 
 async function loadMembers() {
   refreshButton.disabled = true;
-  summary.textContent = "?????????";
+  summary.textContent = "正在刷新成员数据…";
   try {
     const result = await bridge.apiGet("members");
     members = Array.isArray(result.members) ? result.members : [];
@@ -1052,7 +1052,7 @@ async function loadMembers() {
     members = [];
     table.hidden = true;
     emptyState.hidden = false;
-    summary.textContent = error.message || "????????";
+    summary.textContent = error.message || "读取成员数据失败";
   } finally {
     refreshButton.disabled = false;
   }
