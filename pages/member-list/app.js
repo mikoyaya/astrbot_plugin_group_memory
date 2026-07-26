@@ -879,15 +879,22 @@ function applyNetworkVisibility() {
   if (!networkGraph) return;
   networkGraph.nodeElements.forEach((element, memberId) => {
     const level = networkGraph.levels.get(Number(memberId)) || 3;
-    element.hidden = level === 3 && !networkLowRelevanceVisible;
+    const visible = level !== 3 || networkLowRelevanceVisible;
+    element.hidden = !visible;
+    element.style.display = visible ? "" : "none";
+    element.setAttribute("aria-hidden", String(!visible));
   });
   networkGraph.pairElements.forEach((element, pairId) => {
     const pair = networkGraph.pairs.find((item) => item.id === pairId);
-    element.hidden = !networkLowRelevanceVisible && pair.level === 3;
+    const visible = networkLowRelevanceVisible || pair.level !== 3;
+    element.hidden = !visible;
+    element.style.display = visible ? "" : "none";
+    element.setAttribute("aria-hidden", String(!visible));
   });
   const lowCount = [...networkGraph.levels.values()].filter((level) => level === 3).length;
   networkLowRelevanceButton.hidden = lowCount === 0;
   networkLowRelevanceButton.textContent = networkLowRelevanceVisible ? "收起低相关节点" : "显示低相关节点";
+  networkLowRelevanceButton.setAttribute("aria-pressed", String(networkLowRelevanceVisible));
 }
 
 function addNetworkPointerInteractions() {
