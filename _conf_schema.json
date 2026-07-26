@@ -1,0 +1,14 @@
+{
+  "listen_enabled": {
+    "type": "bool",
+    "description": "是否监听 QQ 群消息",
+    "hint": "关闭后插件仍可加载，但不会记录群消息监听日志。",
+    "default": true
+  },
+  "database_filename": {
+    "type": "string",
+    "description": "SQLite 数据库文件名",
+    "hint": "只允许文件名，数据库会保存到 AstrBot 的 data/plugin_data 目录。",
+    "default": "group_memory.db"
+  }
+}

@@ -1,0 +1,1 @@
+# This minimal plugin uses only Python's standard library and AstrBot APIs.
