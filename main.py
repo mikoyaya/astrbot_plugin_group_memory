@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sqlite3
+import sys
 import time
+from collections import OrderedDict
+from collections.abc import Callable
 from pathlib import Path
 
 from astrbot.api import AstrBotConfig, logger
@@ -24,97 +28,186 @@ QQ_PLATFORM_FILTER = (
 )
 
 
+class _BoundedTTLCache:
+    """Small JSON-only LRU cache for short-lived WebUI summaries."""
+
+    def __init__(
+        self, *, max_entries: int, max_bytes: int, max_value_bytes: int
+    ) -> None:
+        self.max_entries = max_entries
+        self.max_bytes = max_bytes
+        self.max_value_bytes = max_value_bytes
+        self._entries: OrderedDict[tuple[object, ...], tuple[float, int, str]] = (
+            OrderedDict()
+        )
+        self._byte_size = 0
+
+    def get(self, key: tuple[object, ...]) -> object | None:
+        now = time.monotonic()
+        self._purge_expired(now)
+        entry = self._entries.pop(key, None)
+        if entry is None:
+            return None
+        expires_at, byte_size, payload = entry
+        if expires_at <= now:
+            self._byte_size -= byte_size
+            return None
+        self._entries[key] = entry
+        try:
+            return json.loads(payload)
+        except (TypeError, ValueError):
+            self._byte_size -= byte_size
+            self._entries.pop(key, None)
+            return None
+
+    def put(self, key: tuple[object, ...], value: object, *, ttl_seconds: float) -> bool:
+        try:
+            payload = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+        except (TypeError, ValueError):
+            return False
+        byte_size = len(payload.encode("utf-8"))
+        if byte_size > self.max_value_bytes:
+            return False
+
+        now = time.monotonic()
+        self._purge_expired(now)
+        previous = self._entries.pop(key, None)
+        if previous is not None:
+            self._byte_size -= previous[1]
+        self._entries[key] = (now + ttl_seconds, byte_size, payload)
+        self._byte_size += byte_size
+        while self._entries and (
+            len(self._entries) > self.max_entries
+            or self._byte_size > self.max_bytes
+        ):
+            _, (_, evicted_size, _) = self._entries.popitem(last=False)
+            self._byte_size -= evicted_size
+        return True
+
+    def invalidate(self, predicate: Callable[[tuple[object, ...]], bool]) -> None:
+        for key in tuple(self._entries):
+            if predicate(key):
+                _, byte_size, _ = self._entries.pop(key)
+                self._byte_size -= byte_size
+
+    def clear(self) -> None:
+        self._entries.clear()
+        self._byte_size = 0
+
+    def _purge_expired(self, now: float) -> None:
+        for key, (expires_at, byte_size, _) in tuple(self._entries.items()):
+            if expires_at > now:
+                continue
+            self._entries.pop(key, None)
+            self._byte_size -= byte_size
+
+
 class GroupMemoryPlugin(Star):
     """QQ group message recorder with basic group-member management commands."""
 
     WARNING_LOG_INTERVAL_SECONDS = 60
+    WARNING_LOG_KEY_TTL_SECONDS = 300
+    MAX_WARNING_LOG_KEYS = 128
+    WEB_CACHE_MAX_ENTRIES = 256
+    WEB_CACHE_MAX_BYTES = 2 * 1024 * 1024
+    WEB_CACHE_MAX_VALUE_BYTES = 64 * 1024
+    WEB_CACHE_MEMBERS_TTL_SECONDS = 10
+    WEB_CACHE_MEMBER_TTL_SECONDS = 20
+    WEB_CACHE_RELATION_TTL_SECONDS = 5
+    WEB_CACHE_CONFIG_TTL_SECONDS = 60
 
     def __init__(self, context: Context, config: AstrBotConfig) -> None:
         super().__init__(context)
         self.config = config
         self.database: GroupMemoryDatabase | None = None
         self.database_ready = False
-        self._last_warning_log_at: dict[str, float] = {}
+        self._last_warning_log_at: OrderedDict[str, float] = OrderedDict()
+        self._read_cache = _BoundedTTLCache(
+            max_entries=self.WEB_CACHE_MAX_ENTRIES,
+            max_bytes=self.WEB_CACHE_MAX_BYTES,
+            max_value_bytes=self.WEB_CACHE_MAX_VALUE_BYTES,
+        )
+        self._registered_web_api_routes: set[str] = set()
 
-        context.register_web_api(
+        self._register_web_api(context,
             f"/{PLUGIN_NAME}/members",
             self.webui_members,
             ["GET"],
             "List recorded QQ group members for the plugin Page.",
         )
-        context.register_web_api(
+        self._register_web_api(context,
             f"/{PLUGIN_NAME}/member",
             self.webui_member_detail,
             ["GET"],
             "Get one recorded QQ group member for the plugin Page.",
         )
-        context.register_web_api(
+        self._register_web_api(context,
             f"/{PLUGIN_NAME}/member/note",
             self.webui_member_note,
             ["POST"],
             "Update one recorded QQ group member note.",
         )
-        context.register_web_api(
+        self._register_web_api(context,
             f"/{PLUGIN_NAME}/member/tags/add",
             self.webui_member_tag_add,
             ["POST"],
             "Add one tag to a recorded QQ group member.",
         )
-        context.register_web_api(
+        self._register_web_api(context,
             f"/{PLUGIN_NAME}/member/tags/remove",
             self.webui_member_tag_remove,
             ["POST"],
             "Remove one tag from a recorded QQ group member.",
         )
-        context.register_web_api(
+        self._register_web_api(context,
             f"/{PLUGIN_NAME}/member/aliases/add",
             self.webui_member_alias_add,
             ["POST"],
             "Add a manually verified alias to a group member.",
         )
-        context.register_web_api(
+        self._register_web_api(context,
             f"/{PLUGIN_NAME}/member/aliases/remove",
             self.webui_member_alias_remove,
             ["POST"],
             "Remove one member alias.",
         )
-        context.register_web_api(
+        self._register_web_api(context,
             f"/{PLUGIN_NAME}/member/merge",
             self.webui_member_merge,
             ["POST"],
             "Manually merge one group member identity into another.",
         )
-        context.register_web_api(
+        self._register_web_api(context,
             f"/{PLUGIN_NAME}/member/layered-tags/add",
             self.webui_layered_tag_add,
             ["POST"],
             "Add a layered member tag without automatic fact promotion.",
         )
-        context.register_web_api(
+        self._register_web_api(context,
             f"/{PLUGIN_NAME}/member/layered-tags/remove",
             self.webui_layered_tag_remove,
             ["POST"],
             "Remove one layered member tag.",
         )
-        context.register_web_api(
+        self._register_web_api(context,
             f"/{PLUGIN_NAME}/relationship-events",
             self.webui_relationship_events,
             ["GET", "POST"],
             "List or create auditable relationship events.",
         )
-        context.register_web_api(
+        self._register_web_api(context,
             f"/{PLUGIN_NAME}/relationship-aggregates",
             self.webui_relationship_aggregates,
             ["GET"],
             "List live relationship aggregates without replacing evidence.",
         )
-        context.register_web_api(
+        self._register_web_api(context,
             f"/{PLUGIN_NAME}/relationship-network",
             self.webui_relationship_network,
             ["GET"],
             "Return one bounded relationship graph for the plugin Page.",
         )
-        context.register_web_api(
+        self._register_web_api(context,
             f"/{PLUGIN_NAME}/relationship-aggregate-events",
             self.webui_relationship_aggregate_events,
             ["GET"],
@@ -129,6 +222,20 @@ class GroupMemoryPlugin(Star):
             logger.info("QQ 群档案插件已初始化 SQLite 数据库。")
         except (OSError, sqlite3.Error, ValueError):
             logger.exception("QQ 群档案插件无法初始化 SQLite 数据库。")
+
+    def _register_web_api(
+        self,
+        context: Context,
+        route: str,
+        handler,
+        methods: list[str],
+        description: str,
+    ) -> None:
+        """Keep an instance from registering the same Page route twice."""
+        if route in self._registered_web_api_routes:
+            return
+        context.register_web_api(route, handler, methods, description)
+        self._registered_web_api_routes.add(route)
 
     def _get_database_path(self) -> Path:
         """Build a safe database path in AstrBot's persistent plugin-data area."""
@@ -462,6 +569,9 @@ class GroupMemoryPlugin(Star):
             except (ValueError, sqlite3.Error, OSError):
                 yield event.plain_result("修改插件配置失败，数据库暂时不可用。")
                 return
+            self._invalidate_config_cache()
+            if key == "webui_member_limit":
+                self._read_cache.invalidate(lambda cache_key: cache_key[:1] == ("members",))
             yield event.plain_result(f"已保存插件内部配置：{key} = {value}")
             return
         yield event.plain_result(
@@ -475,14 +585,19 @@ class GroupMemoryPlugin(Star):
             return jsonify({"status": "error", "message": "数据库尚未就绪"}), 503
         database = self.database
         try:
-            configured_limit = await asyncio.to_thread(
+            configured_limit = await self._cached_database_read(
+                ("config", "webui_member_limit"),
+                self.WEB_CACHE_CONFIG_TTL_SECONDS,
                 database.get_config_value,
                 "webui_member_limit",
                 str(GroupMemoryDatabase.DEFAULT_WEBUI_MEMBER_LIMIT),
             )
             requested_limit = request.args.get("limit", configured_limit, type=int)
-            members = await asyncio.to_thread(
-                database.list_member_overview, requested_limit
+            members = await self._cached_database_read(
+                ("members", str(requested_limit)),
+                self.WEB_CACHE_MEMBERS_TTL_SECONDS,
+                database.list_member_overview,
+                requested_limit,
             )
         except (TypeError, ValueError, sqlite3.Error, OSError):
             self._log_exception_throttled(
@@ -662,6 +777,7 @@ class GroupMemoryPlugin(Star):
                 "webui-member-merge-failed", "QQ 群档案插件合并成员身份失败。"
             )
             return self._webui_error("合并成员身份失败", status_code=500)
+        self._invalidate_webui_cache(identity)
         return jsonify({"status": "ok"})
 
     async def webui_layered_tag_add(self):
@@ -784,6 +900,7 @@ class GroupMemoryPlugin(Star):
                 "webui-event-write-failed", "QQ 群档案插件保存关系事件失败。"
             )
             return self._webui_error("保存关系事件失败", status_code=500)
+        self._invalidate_webui_cache(identity)
         return jsonify({"status": "ok"})
 
     async def webui_relationship_aggregates(self):
@@ -800,14 +917,27 @@ class GroupMemoryPlugin(Star):
         if not self._database_is_ready_for_webui():
             return self._webui_database_not_ready()
         try:
-            aggregates = await asyncio.to_thread(
+            event_types = self._webui_choice_filters("event_type")
+            source_types = self._webui_choice_filters("source_type")
+            limit = request.args.get("limit", 50, type=int)
+            aggregates = await self._cached_database_read(
+                (
+                    "aggregates",
+                    platform_id,
+                    external_group_id,
+                    external_user_id or "",
+                    str(limit),
+                    tuple(sorted(event_types)),
+                    tuple(sorted(source_types)),
+                ),
+                self.WEB_CACHE_RELATION_TTL_SECONDS,
                 self.database.list_relationship_aggregates,
                 platform_id=platform_id,
                 external_group_id=external_group_id,
                 external_user_id=external_user_id or None,
-                limit=request.args.get("limit", 50, type=int),
-                event_types=self._webui_choice_filters("event_type"),
-                source_types=self._webui_choice_filters("source_type"),
+                limit=limit,
+                event_types=event_types,
+                source_types=source_types,
             )
         except (TypeError, ValueError, sqlite3.Error, OSError):
             self._log_exception_throttled(
@@ -824,16 +954,33 @@ class GroupMemoryPlugin(Star):
         if not self._database_is_ready_for_webui():
             return self._webui_database_not_ready()
         try:
-            network = await asyncio.to_thread(
+            scope = self._as_text(request.args.get("scope")) or "one_hop"
+            node_limit = request.args.get("node_limit", 30, type=int)
+            edge_limit = request.args.get("edge_limit", 50, type=int)
+            event_types = self._webui_choice_filters("event_type")
+            source_types = self._webui_choice_filters("source_type")
+            network = await self._cached_database_read(
+                (
+                    "network",
+                    identity["platform_id"],
+                    identity["external_group_id"],
+                    identity["external_user_id"],
+                    scope,
+                    str(node_limit),
+                    str(edge_limit),
+                    tuple(sorted(event_types)),
+                    tuple(sorted(source_types)),
+                ),
+                self.WEB_CACHE_RELATION_TTL_SECONDS,
                 self.database.get_relationship_network,
                 platform_id=identity["platform_id"],
                 external_group_id=identity["external_group_id"],
                 external_user_id=identity["external_user_id"],
-                scope=self._as_text(request.args.get("scope")) or "one_hop",
-                node_limit=request.args.get("node_limit", 30, type=int),
-                edge_limit=request.args.get("edge_limit", 50, type=int),
-                event_types=self._webui_choice_filters("event_type"),
-                source_types=self._webui_choice_filters("source_type"),
+                scope=scope,
+                node_limit=node_limit,
+                edge_limit=edge_limit,
+                event_types=event_types,
+                source_types=source_types,
             )
         except (TypeError, ValueError, sqlite3.Error, OSError):
             self._log_exception_throttled(
@@ -883,8 +1030,17 @@ class GroupMemoryPlugin(Star):
         """Load the latest details after a Page read or mutation."""
         if not self._database_is_ready_for_webui():
             return self._webui_database_not_ready()
+        if request.method != "GET":
+            self._invalidate_webui_cache(identity)
         try:
-            member = await asyncio.to_thread(
+            member = await self._cached_database_read(
+                (
+                    "member",
+                    identity["platform_id"],
+                    identity["external_group_id"],
+                    identity["external_user_id"],
+                ),
+                self.WEB_CACHE_MEMBER_TTL_SECONDS,
                 self.database.get_profile_overview,
                 platform_id=identity["platform_id"],
                 external_group_id=identity["external_group_id"],
@@ -939,6 +1095,50 @@ class GroupMemoryPlugin(Star):
 
     def _database_is_ready_for_webui(self) -> bool:
         return self.database_ready and self.database is not None
+
+    async def _cached_database_read(
+        self,
+        cache_key: tuple[object, ...],
+        ttl_seconds: float,
+        operation,
+        *args,
+        **kwargs,
+    ) -> object:
+        """Read a small, JSON-compatible summary without retaining DB objects."""
+        cached = self._read_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        result = await asyncio.to_thread(operation, *args, **kwargs)
+        if result is not None:
+            self._read_cache.put(cache_key, result, ttl_seconds=ttl_seconds)
+        return result
+
+    def _invalidate_webui_cache(
+        self, identity: dict[str, str] | None = None
+    ) -> None:
+        """Drop affected summary responses after a manual data mutation."""
+        if identity is None:
+            self._read_cache.clear()
+            return
+        platform_id = identity["platform_id"]
+        group_id = identity["external_group_id"]
+
+        def affects(key: tuple[object, ...]) -> bool:
+            if not key:
+                return False
+            kind = key[0]
+            if kind == "members":
+                return True
+            if kind == "member":
+                return key[1:3] == (platform_id, group_id)
+            if kind in {"aggregates", "network"}:
+                return key[1:3] == (platform_id, group_id)
+            return False
+
+        self._read_cache.invalidate(affects)
+
+    def _invalidate_config_cache(self) -> None:
+        self._read_cache.invalidate(lambda key: bool(key) and key[0] == "config")
 
     @staticmethod
     def _webui_error(message: str, status_code: int = 400):
@@ -1119,14 +1319,36 @@ class GroupMemoryPlugin(Star):
 
     def _should_log_warning(self, key: str) -> bool:
         now = time.monotonic()
+        expiry = now - self.WARNING_LOG_KEY_TTL_SECONDS
+        for stale_key, logged_at in tuple(self._last_warning_log_at.items()):
+            if logged_at >= expiry:
+                continue
+            self._last_warning_log_at.pop(stale_key, None)
         last_logged_at = self._last_warning_log_at.get(key)
         if (
             last_logged_at is not None
             and now - last_logged_at < self.WARNING_LOG_INTERVAL_SECONDS
         ):
+            self._last_warning_log_at.move_to_end(key)
             return False
         self._last_warning_log_at[key] = now
+        self._last_warning_log_at.move_to_end(key)
+        while len(self._last_warning_log_at) > self.MAX_WARNING_LOG_KEYS:
+            self._last_warning_log_at.popitem(last=False)
         return True
+
+    @staticmethod
+    def _release_optional_runtime_resources() -> None:
+        """Release CUDA cache only when a future feature already loaded torch."""
+        torch_module = sys.modules.get("torch")
+        cuda = getattr(torch_module, "cuda", None) if torch_module is not None else None
+        empty_cache = getattr(cuda, "empty_cache", None)
+        if not callable(empty_cache):
+            return
+        try:
+            empty_cache()
+        except (AttributeError, RuntimeError, TypeError, ValueError):
+            logger.debug("QQ group memory plugin skipped optional CUDA cache cleanup.")
 
     async def terminate(self) -> None:
         """Release resources when AstrBot unloads or disables this plugin."""
@@ -1138,4 +1360,10 @@ class GroupMemoryPlugin(Star):
             finally:
                 self.database = None
                 self.database_ready = False
+        self.database = None
+        self.database_ready = False
+        self._read_cache.clear()
+        self._last_warning_log_at.clear()
+        self._registered_web_api_routes.clear()
+        self._release_optional_runtime_resources()
         logger.info("QQ 群档案插件已停止。")

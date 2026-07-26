@@ -77,12 +77,14 @@ const relationshipMoreButton = document.getElementById("relationship-more-button
 let members = [];
 let selectedMember = null;
 let networkCenter = null;
-let networkData = null;
+let networkLoaded = false;
 let networkExpanded = false;
 let networkLowRelevanceVisible = false;
 let activeAggregate = null;
 let activeAggregateIdentity = null;
 let evidenceCursor = null;
+let relationshipEvidenceCount = 0;
+let relationshipEvidenceToken = 0;
 let networkGraph = null;
 let networkViewport = { scale: 1, x: 0, y: 0 };
 let networkPointerState = null;
@@ -90,6 +92,7 @@ let networkLoadToken = 0;
 let networkLayoutSnapshot = null;
 let suppressNetworkNodeClickUntil = 0;
 let memberRelationshipAnalysisToken = 0;
+let networkRelationshipAnalysisToken = 0;
 
 const NETWORK_WIDTH = 980;
 const NETWORK_HEIGHT = 620;
@@ -97,6 +100,9 @@ const NETWORK_MIN_SCALE = 0.82;
 const NETWORK_MAX_SCALE = 2.2;
 const NETWORK_DRAG_THRESHOLD_PX = 6;
 const NETWORK_SECOND_LAYER_LIMIT = 12;
+const RELATION_ANALYSIS_MAX_PAGES_PER_AGGREGATE = 3;
+const RELATION_ANALYSIS_MAX_EVENTS_PER_AGGREGATE = 150;
+const RELATIONSHIP_EVIDENCE_DOM_LIMIT = 200;
 
 function text(value, fallback = "") {
   return value === undefined || value === null ? fallback : String(value);
@@ -380,19 +386,26 @@ function renderEvents(member) {
 async function analyzeMemberRelationshipPairs(pairs, member) {
   const identity = memberIdentity(member);
   const token = ++memberRelationshipAnalysisToken;
+  const isCurrent = () => token === memberRelationshipAnalysisToken
+    && selectedMember && sameMember(selectedMember, member);
   const nowSeconds = Math.floor(Date.now() / 1000);
   const cutoffTimestamp = nowSeconds - RELATIONSHIP_WINDOW_SECONDS;
   try {
     await mapConcurrent(pairs, 1, async (pair) => {
       const directionalEvents = await mapConcurrent(pair.aggregates, 3,
-        (aggregate) => loadAggregateWindowEvents(aggregate, identity, cutoffTimestamp));
-      if (token !== memberRelationshipAnalysisToken || !selectedMember || !sameMember(selectedMember, member)) return;
-      pair.analysis = deriveRelationshipSemantics({
-        memberA: pair.memberA,
-        memberB: pair.memberB,
-        directionalEvents,
-        nowSeconds,
-      });
+        (aggregate) => loadAggregateWindowEvents(aggregate, identity, cutoffTimestamp, isCurrent));
+      if (!isCurrent()) return;
+      pair.analysis = directionalEvents.every((aggregate) => aggregate.analysis_complete)
+        ? deriveRelationshipSemantics({
+          memberA: pair.memberA,
+          memberB: pair.memberB,
+          directionalEvents,
+          nowSeconds,
+        })
+        : {
+          ...pendingRelationshipSemantics(),
+          reasons: ["近 90 天证据超过前端安全采样上限，保守保持待判断。"],
+        };
       const row = [...relationshipEventList.children].find((item) => item.dataset.pairId === pair.id);
       if (!row) return;
       row.querySelector("strong").textContent = `${pair.analysis.label} · ${memberDisplayName(pair.memberA)} ↔ ${memberDisplayName(pair.memberB)}`;
@@ -466,7 +479,7 @@ function setView(view) {
   networkView.hidden = !isNetwork;
   membersViewButton.classList.toggle("is-active", !isNetwork);
   networkViewButton.classList.toggle("is-active", isNetwork);
-  if (isNetwork && networkCenter && !networkData) loadNetwork();
+  if (isNetwork && networkCenter && !networkLoaded) loadNetwork();
 }
 
 function chooseNetworkCenter(member) {
@@ -474,7 +487,7 @@ function chooseNetworkCenter(member) {
   networkLayoutSnapshot = null;
   networkCenter = { ...memberIdentity(member), member_id: Number(member.member_id || 0) };
   networkCenterInput.value = member.nickname || member.user_id || member.external_user_id || "";
-  networkData = null;
+  networkLoaded = false;
   networkExpanded = false;
   networkLowRelevanceVisible = false;
   networkPointerState = null;
@@ -516,6 +529,7 @@ function renderCenterResults() {
 }
 
 async function loadNetwork() {
+  networkRelationshipAnalysisToken += 1;
   if (!networkCenter) {
     networkStatus.textContent = "请选择一名成员作为关系网中心。";
     networkEmpty.hidden = false;
@@ -539,11 +553,11 @@ async function loadNetwork() {
     if (networkSourceInput.value) parameters.source_type = networkSourceInput.value;
     const loadedNetwork = await bridge.apiGet("relationship-network", parameters);
     if (loadToken !== networkLoadToken) return;
-    networkData = loadedNetwork;
-    renderNetwork(networkData);
+    renderNetwork(loadedNetwork);
+    networkLoaded = true;
   } catch (error) {
     if (loadToken !== networkLoadToken) return;
-    networkData = null;
+    networkLoaded = false;
     networkCanvas.replaceChildren();
     networkGraph = null;
     hideNetworkTooltip();
@@ -1290,9 +1304,11 @@ function renderPairEvidenceLinks(pair) {
 }
 
 function openRelationshipPair(pair) {
+  relationshipEvidenceToken += 1;
   activeAggregate = null;
   activeAggregateIdentity = networkCenter || selectedMember;
   evidenceCursor = null;
+  relationshipEvidenceCount = 0;
   relationshipSummary.dataset.pairId = pair.id;
   renderPairSummary(pair);
   renderPairEvidenceLinks(pair);
@@ -1314,11 +1330,14 @@ async function mapConcurrent(items, limit, operation) {
   return results;
 }
 
-async function loadAggregateWindowEvents(aggregate, identity, cutoffTimestamp) {
+async function loadAggregateWindowEvents(aggregate, identity, cutoffTimestamp, isCurrent = () => true) {
   const events = [];
   let cursor = null;
   let completed = false;
-  while (!completed) {
+  let pagesRead = 0;
+  while (!completed && pagesRead < RELATION_ANALYSIS_MAX_PAGES_PER_AGGREGATE
+    && events.length < RELATION_ANALYSIS_MAX_EVENTS_PER_AGGREGATE) {
+    if (!isCurrent()) return { ...aggregate, events: [], analysis_complete: false, cancelled: true };
     const parameters = {
       platform_id: identity.platform_id,
       group_id: identity.group_id,
@@ -1333,33 +1352,50 @@ async function loadAggregateWindowEvents(aggregate, identity, cutoffTimestamp) {
       parameters.before_id = cursor.before_id;
     }
     const result = await bridge.apiGet("relationship-aggregate-events", parameters);
+    if (!isCurrent()) return { ...aggregate, events: [], analysis_complete: false, cancelled: true };
     const page = Array.isArray(result.events) ? result.events : [];
-    events.push(...page.filter((event) => Number(event.event_timestamp || 0) >= cutoffTimestamp));
+    const withinWindow = page.filter((event) => Number(event.event_timestamp || 0) >= cutoffTimestamp);
+    const remaining = RELATION_ANALYSIS_MAX_EVENTS_PER_AGGREGATE - events.length;
+    events.push(...withinWindow.slice(0, Math.max(remaining, 0)));
     const oldestTimestamp = page.length
       ? Math.min(...page.map((event) => Number(event.event_timestamp || 0))) : 0;
     cursor = result.next_cursor || null;
     completed = !cursor || !page.length || oldestTimestamp < cutoffTimestamp;
+    pagesRead += 1;
   }
-  return { ...aggregate, events };
+  return {
+    ...aggregate,
+    events,
+    analysis_complete: completed,
+    analysis_limited: !completed,
+  };
 }
 
 async function analyzeRelationshipPairs(graph) {
   const identity = networkCenter;
   if (!identity || graph !== networkGraph) return;
+  const token = ++networkRelationshipAnalysisToken;
+  const isCurrent = () => token === networkRelationshipAnalysisToken
+    && graph === networkGraph && networkCenter && sameMember(networkCenter, identity);
   const nowSeconds = Math.floor(Date.now() / 1000);
   const cutoffTimestamp = nowSeconds - RELATIONSHIP_WINDOW_SECONDS;
   try {
     const centerPairs = graph.pairs.filter((pair) => pairIncludesMember(pair, graph.centerMemberId));
     await mapConcurrent(centerPairs, 1, async (pair) => {
       const directionalEvents = await mapConcurrent(pair.aggregates, 3,
-        (aggregate) => loadAggregateWindowEvents(aggregate, identity, cutoffTimestamp));
-      if (graph !== networkGraph) return;
-      pair.analysis = deriveRelationshipSemantics({
-        memberA: pair.memberA,
-        memberB: pair.memberB,
-        directionalEvents,
-        nowSeconds,
-      });
+        (aggregate) => loadAggregateWindowEvents(aggregate, identity, cutoffTimestamp, isCurrent));
+      if (!isCurrent()) return;
+      pair.analysis = directionalEvents.every((aggregate) => aggregate.analysis_complete)
+        ? deriveRelationshipSemantics({
+          memberA: pair.memberA,
+          memberB: pair.memberB,
+          directionalEvents,
+          nowSeconds,
+        })
+        : {
+          ...pendingRelationshipSemantics(),
+          reasons: ["近 90 天证据超过前端安全采样上限，保守保持待判断。"],
+        };
       updatePairPresentation(pair);
       if (!relationshipDialog.open) return;
       const visiblePair = relationshipSummary.dataset.pairId;
@@ -1368,11 +1404,11 @@ async function analyzeRelationshipPairs(graph) {
         renderPairEvidenceLinks(pair);
       }
     });
-    if (graph === networkGraph) {
-      networkStatus.textContent = `显示 ${graph.nodes.length} 个成员、${graph.pairs.length} 条成员对关系；中心成员的一跳关系已完成近 90 天语义分析。`;
+    if (isCurrent()) {
+      networkStatus.textContent = `显示 ${graph.nodes.length} 个成员、${graph.pairs.length} 条成员对关系；中心成员的一跳关系已完成受限近 90 天语义分析。`;
     }
   } catch (error) {
-    if (graph === networkGraph) {
+    if (isCurrent()) {
       networkStatus.textContent = `关系网已显示，但部分语义分析失败：${error.message || "请稍后刷新"}`;
     }
   }
@@ -1402,47 +1438,85 @@ function renderAggregateSummary(aggregate) {
 
 async function loadAggregateEvidence(append = false) {
   if (!activeAggregate || !activeAggregateIdentity) return;
+  const requestToken = relationshipEvidenceToken;
+  const aggregate = activeAggregate;
+  const identity = activeAggregateIdentity;
+  const remaining = RELATIONSHIP_EVIDENCE_DOM_LIMIT - relationshipEvidenceCount;
+  if (remaining <= 0) {
+    evidenceCursor = null;
+    relationshipMoreButton.hidden = true;
+    return;
+  }
   relationshipMoreButton.disabled = true;
   try {
     const cursor = append ? evidenceCursor : null;
     const parameters = {
-      platform_id: activeAggregateIdentity.platform_id,
-      group_id: activeAggregateIdentity.group_id,
-      source_member_id: activeAggregate.source_member_id,
-      event_type: activeAggregate.event_type,
+      platform_id: identity.platform_id,
+      group_id: identity.group_id,
+      source_member_id: aggregate.source_member_id,
+      event_type: aggregate.event_type,
+      limit: Math.min(50, remaining),
     };
-    if (activeAggregate.target_member_id !== null && activeAggregate.target_member_id !== undefined) {
-      parameters.target_member_id = activeAggregate.target_member_id;
+    if (aggregate.target_member_id !== null && aggregate.target_member_id !== undefined) {
+      parameters.target_member_id = aggregate.target_member_id;
     }
     if (cursor) {
       parameters.before_timestamp = cursor.before_timestamp;
       parameters.before_id = cursor.before_id;
     }
     const result = await bridge.apiGet("relationship-aggregate-events", parameters);
+    if (requestToken !== relationshipEvidenceToken || aggregate !== activeAggregate) return;
     if (!append) relationshipEvidenceList.replaceChildren();
     const events = Array.isArray(result.events) ? result.events : [];
-    events.forEach((event) => relationshipEvidenceList.append(recordRow({
+    if (!append) relationshipEvidenceCount = 0;
+    const acceptedEvents = events.slice(0, Math.max(RELATIONSHIP_EVIDENCE_DOM_LIMIT - relationshipEvidenceCount, 0));
+    acceptedEvents.forEach((event) => relationshipEvidenceList.append(recordRow({
       title: `${eventTypeLabel(event.event_type)} · ${event.source_nickname || event.source_user_id} → ${event.target_nickname || event.target_user_id || "无目标成员"}`,
       meta: `来源：${eventSourceLabel(event.source_type)}；时间：${formatTimestamp(event.event_timestamp)}；置信度：${Math.round(Number(event.confidence || 0) * 100)}%；证据：${event.content}`,
     })));
-    if (!events.length && !append) relationshipEvidenceList.append(recordRow({ title: "暂无可读取的原始证据" }));
-    evidenceCursor = result.next_cursor || null;
+    relationshipEvidenceCount += acceptedEvents.length;
+    if (!acceptedEvents.length && !append) relationshipEvidenceList.append(recordRow({ title: "暂无可读取的原始证据" }));
+    const reachedLimit = relationshipEvidenceCount >= RELATIONSHIP_EVIDENCE_DOM_LIMIT;
+    if (reachedLimit && result.next_cursor) {
+      relationshipEvidenceList.append(recordRow({
+        title: "已达到本次查看上限",
+        meta: "为保持页面稳定，最多保留 200 条证据。关闭后重新打开即可从头查看。",
+      }));
+    }
+    evidenceCursor = reachedLimit ? null : (result.next_cursor || null);
     relationshipMoreButton.hidden = !evidenceCursor;
   } catch (error) {
-    if (!append) relationshipEvidenceList.replaceChildren(recordRow({ title: "读取原始证据失败", meta: error.message || "请稍后重试" }));
+    if (requestToken === relationshipEvidenceToken && !append) {
+      relationshipEvidenceList.replaceChildren(recordRow({ title: "读取原始证据失败", meta: error.message || "请稍后重试" }));
+    }
   } finally {
-    relationshipMoreButton.disabled = false;
+    if (requestToken === relationshipEvidenceToken) relationshipMoreButton.disabled = false;
   }
 }
 
 async function openAggregate(aggregate) {
+  relationshipEvidenceToken += 1;
   activeAggregate = aggregate;
   activeAggregateIdentity = networkCenter || selectedMember;
   evidenceCursor = null;
+  relationshipEvidenceCount = 0;
   delete relationshipSummary.dataset.pairId;
   renderAggregateSummary(aggregate);
   if (!relationshipDialog.open) relationshipDialog.showModal();
   await loadAggregateEvidence();
+}
+
+function clearRelationshipDialogState() {
+  relationshipEvidenceToken += 1;
+  activeAggregate = null;
+  activeAggregateIdentity = null;
+  evidenceCursor = null;
+  relationshipEvidenceCount = 0;
+  delete relationshipSummary.dataset.pairId;
+  relationshipSummary.replaceChildren();
+  relationshipEvidenceList.replaceChildren();
+  relationshipMoreButton.hidden = true;
+  relationshipMoreButton.disabled = false;
 }
 
 function syncMember(member) {
@@ -1598,7 +1672,7 @@ async function addRelationshipEvent() {
     eventTargetInput.value = "";
     eventContentInput.value = "";
   }, "关系事件已记录");
-  networkData = null;
+  networkLoaded = false;
   if (!networkView.hidden && networkCenter) loadNetwork();
 }
 
@@ -1672,5 +1746,6 @@ dialog.addEventListener("click", (event) => {
 relationshipDialog.addEventListener("click", (event) => {
   if (event.target === relationshipDialog) relationshipDialog.close();
 });
+relationshipDialog.addEventListener("close", clearRelationshipDialogState);
 addNetworkPointerInteractions();
 loadMembers();

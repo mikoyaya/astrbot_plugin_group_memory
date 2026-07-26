@@ -40,6 +40,14 @@ class GroupMemoryDatabase:
     MAX_NETWORK_EDGE_LIMIT = 200
     DEFAULT_RELATION_EVIDENCE_LIMIT = 50
     MAX_RELATION_EVIDENCE_LIMIT = 100
+    RELATIONSHIP_LIVE_WINDOW_SECONDS = 90 * 24 * 60 * 60
+    MAX_RELATION_PREAGGREGATE_ROWS = 2_000
+    MAX_RELATION_EVIDENCE_PREVIEW_CHARS = 280
+    MAX_RELATION_EVENT_CONTENT_CHARS = 4_096
+    MAX_MEMBER_DETAIL_TEXT_CHARS = 4_096
+    MAX_MEMBER_OVERVIEW_CANDIDATES = 2_000
+    MAX_MEMBER_METADATA_ITEMS = 100
+    MAX_MEMORY_PREVIEW_CHARS = 1_024
     ALIAS_TYPES = {"nickname", "group_note", "manual", "historical", "mention"}
     TAG_LAYERS = {"confirmed", "observed", "reported", "manual"}
     EVENT_TYPES = {
@@ -968,6 +976,38 @@ class GroupMemoryDatabase:
         ).fetchone()
         return None if row is None else str(row[0])
 
+    def _get_note_preview(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        platform_id: str,
+        external_group_id: str,
+        external_user_id: str,
+    ) -> str | None:
+        """Read only a small list-view note preview from SQLite."""
+        row = connection.execute(
+            """
+            SELECT substr(n.content, 1, ?)
+            FROM "notes" AS n
+            JOIN "groups" AS g ON g.id = n.group_id
+            JOIN "users" AS u ON u.id = n.user_id
+            WHERE g.platform_id = ?
+              AND g.external_group_id = ?
+              AND u.external_user_id = ?
+            """,
+            (
+                self.MAX_RELATION_EVIDENCE_PREVIEW_CHARS + 1,
+                platform_id,
+                external_group_id,
+                external_user_id,
+            ),
+        ).fetchone()
+        if row is None:
+            return None
+        return self._preview_relation_text(
+            row[0], self.MAX_RELATION_EVIDENCE_PREVIEW_CHARS
+        )
+
     def _add_tag_in_transaction(
         self,
         connection: sqlite3.Connection,
@@ -1026,8 +1066,14 @@ class GroupMemoryDatabase:
               AND g.external_group_id = ?
               AND u.external_user_id = ?
             ORDER BY t.name COLLATE NOCASE
+            LIMIT ?
             """,
-            (platform_id, external_group_id, external_user_id),
+            (
+                platform_id,
+                external_group_id,
+                external_user_id,
+                self.MAX_MEMBER_METADATA_ITEMS,
+            ),
         ).fetchall()
         return [str(row[0]) for row in rows]
 
@@ -1091,8 +1137,8 @@ class GroupMemoryDatabase:
                 g.group_name,
                 u.external_user_id,
                 u.nickname,
-                p.summary,
-                n.content AS note
+                substr(p.summary, 1, ?),
+                substr(n.content, 1, ?) AS note
             FROM "groups" AS g
             JOIN "users" AS u
               ON u.platform_id = g.platform_id
@@ -1102,7 +1148,13 @@ class GroupMemoryDatabase:
             WHERE g.platform_id = ?
               AND g.external_group_id = ?
             """,
-            (external_user_id, platform_id, external_group_id),
+            (
+                self.MAX_MEMBER_DETAIL_TEXT_CHARS + 1,
+                self.MAX_MEMBER_DETAIL_TEXT_CHARS + 1,
+                external_user_id,
+                platform_id,
+                external_group_id,
+            ),
         ).fetchone()
         if row is None:
             return None
@@ -1120,10 +1172,14 @@ class GroupMemoryDatabase:
             "external_user_id": str(row[4]),
             "nickname": row[5] or "",
             "member_status": str(canonical_identity["member_status"]),
-            "summary": row[6] or "",
+            "summary": self._preview_relation_text(
+                row[6], self.MAX_MEMBER_DETAIL_TEXT_CHARS
+            ),
             "message_count": message_count,
             "last_message_timestamp": last_message_timestamp,
-            "note": row[7] or "",
+            "note": self._preview_relation_text(
+                row[7], self.MAX_MEMBER_DETAIL_TEXT_CHARS
+            ),
             "tags": self._list_tags(
                 connection,
                 platform_id=platform_id,
@@ -1170,7 +1226,7 @@ class GroupMemoryDatabase:
     ) -> list[dict[str, object]]:
         rows = connection.execute(
             """
-            SELECT m.id, m.content, m.created_at, u.external_user_id, u.nickname
+            SELECT m.id, substr(m.content, 1, ?), m.created_at, u.external_user_id, u.nickname
             FROM "memories" AS m
             JOIN "groups" AS g ON g.id = m.group_id
             LEFT JOIN "users" AS u ON u.id = m.user_id
@@ -1178,12 +1234,19 @@ class GroupMemoryDatabase:
             ORDER BY m.id DESC
             LIMIT ?
             """,
-            (platform_id, external_group_id, limit),
+            (
+                self.MAX_MEMORY_PREVIEW_CHARS + 1,
+                platform_id,
+                external_group_id,
+                limit,
+            ),
         ).fetchall()
         return [
             {
                 "id": int(row[0]),
-                "content": str(row[1]),
+                "content": self._preview_relation_text(
+                    row[1], self.MAX_MEMORY_PREVIEW_CHARS
+                ),
                 "created_at": str(row[2]),
                 "external_user_id": row[3] or "",
                 "nickname": row[4] or "",
@@ -1239,6 +1302,9 @@ class GroupMemoryDatabase:
     def _list_member_overview(
         self, connection: sqlite3.Connection, *, limit: int
     ) -> list[dict[str, object]]:
+        candidate_limit = min(
+            max(limit * 4, limit), self.MAX_MEMBER_OVERVIEW_CANDIDATES
+        )
         rows = connection.execute(
             """
             SELECT
@@ -1248,13 +1314,11 @@ class GroupMemoryDatabase:
                 g.external_group_id,
                 g.group_name,
                 u.external_user_id,
-                u.nickname,
-                n.content AS note
+                u.nickname
             FROM "members" AS mem
             JOIN "groups" AS g ON g.id = mem.group_id
             JOIN "users" AS u ON u.id = mem.user_id
             LEFT JOIN "messages" AS m ON m.group_id = g.id AND m.user_id = u.id
-            LEFT JOIN "notes" AS n ON n.group_id = g.id AND n.user_id = u.id
             WHERE EXISTS (
                 SELECT 1 FROM "messages" AS member_message
                 WHERE member_message.group_id = g.id AND member_message.user_id = u.id
@@ -1267,7 +1331,24 @@ class GroupMemoryDatabase:
                   )
             )
             GROUP BY mem.id
+            ORDER BY
+                COALESCE(
+                    MAX(m.message_timestamp),
+                    (
+                        SELECT MAX(recent_event.event_timestamp)
+                        FROM "relationship_events" AS recent_event
+                        WHERE recent_event.group_id = g.id
+                          AND (
+                              recent_event.source_member_id = mem.id
+                              OR recent_event.target_member_id = mem.id
+                          )
+                    ),
+                    0
+                ) DESC,
+                mem.id ASC
+            LIMIT ?
             """,
+            (candidate_limit,),
         ).fetchall()
         by_canonical_member: dict[int, dict[str, object]] = {}
         for row in rows:
@@ -1301,7 +1382,7 @@ class GroupMemoryDatabase:
                     "nickname": canonical_identity["nickname"] or row[6] or "",
                     "member_status": str(canonical_identity["member_status"]),
                     "aliases": [
-                        str(alias["alias"])
+                        self._preview_relation_text(alias["alias"], 120)
                         for alias in self._list_member_aliases_for_identity(
                             connection,
                             platform_id=str(row[1]),
@@ -1311,13 +1392,16 @@ class GroupMemoryDatabase:
                     ],
                     "message_count": message_count,
                     "last_message_timestamp": last_message_timestamp,
-                    "note": self._get_note(
+                    "note": self._get_note_preview(
                         connection,
                         platform_id=str(row[1]),
                         external_group_id=str(row[3]),
                         external_user_id=str(canonical_identity["user_id"]),
-                    ) or "",
-                    "tags": ", ".join(tags),
+                    )
+                    or "",
+                    "tags": self._preview_relation_text(
+                        ", ".join(tags), self.MAX_RELATION_EVIDENCE_PREVIEW_CHARS
+                    ),
                 }
         return sorted(
             by_canonical_member.values(),
@@ -1501,8 +1585,9 @@ class GroupMemoryDatabase:
             FROM "member_aliases"
             WHERE member_id = ?
             ORDER BY confidence DESC, alias COLLATE NOCASE
+            LIMIT ?
             """,
-            (member_id,),
+            (member_id, self.MAX_MEMBER_METADATA_ITEMS),
         ).fetchall()
         return [
             {
@@ -1763,8 +1848,9 @@ class GroupMemoryDatabase:
             JOIN "tag_definitions" AS td ON td.id = mt.tag_definition_id
             WHERE mt.member_id IN (""" + placeholders + """)
             ORDER BY td.name COLLATE NOCASE, mt.layer, mt.source_type
+            LIMIT ?
             """,
-            tuple(descendant_member_ids),
+            (*descendant_member_ids, self.MAX_MEMBER_METADATA_ITEMS),
         ).fetchall()
         layered_tags = [
             {
@@ -1790,8 +1876,9 @@ class GroupMemoryDatabase:
             WHERE ut.group_id = ?
               AND mem.id IN (""" + placeholders + """)
             ORDER BY t.name COLLATE NOCASE
+            LIMIT ?
             """,
-            (group_id, *descendant_member_ids),
+            (group_id, *descendant_member_ids, self.MAX_MEMBER_METADATA_ITEMS),
         ).fetchall()
         legacy_tags = [
             {
@@ -1806,7 +1893,7 @@ class GroupMemoryDatabase:
             }
             for row in legacy_rows
         ]
-        return [*legacy_tags, *layered_tags]
+        return [*legacy_tags, *layered_tags][: self.MAX_MEMBER_METADATA_ITEMS]
 
     def _add_layered_tag_in_transaction(
         self,
@@ -1921,7 +2008,7 @@ class GroupMemoryDatabase:
             descendant_member_ids = self._member_descendant_ids(
                 connection, member_id
             )
-        params: list[object] = [group_id]
+        params: list[object] = [self.MAX_RELATION_EVENT_CONTENT_CHARS + 1, group_id]
         member_filter = ""
         if member_id is not None:
             placeholders = ", ".join("?" for _ in descendant_member_ids)
@@ -1934,7 +2021,7 @@ class GroupMemoryDatabase:
         params.append(limit)
         rows = connection.execute(
             f"""
-            SELECT re.id, re.event_type, re.content, re.event_timestamp, re.confidence,
+            SELECT re.id, re.event_type, substr(re.content, 1, ?), re.event_timestamp, re.confidence,
                    re.source_type, re.created_at,
                    su.external_user_id, COALESCE(NULLIF(sm.canonical_name, ''), su.nickname, ''),
                    tu.external_user_id, COALESCE(NULLIF(tm.canonical_name, ''), tu.nickname, '')
@@ -1953,7 +2040,9 @@ class GroupMemoryDatabase:
             {
                 "id": int(row[0]),
                 "event_type": str(row[1]),
-                "content": str(row[2]),
+                "content": self._preview_relation_text(
+                    row[2], self.MAX_RELATION_EVENT_CONTENT_CHARS
+                ),
                 "event_timestamp": int(row[3]),
                 "confidence": float(row[4]),
                 "source_type": str(row[5]),
@@ -2129,7 +2218,12 @@ class GroupMemoryDatabase:
         source_ids = self._member_descendant_ids(connection, source_member_id)
         source_placeholders = ", ".join("?" for _ in source_ids)
         target_filter = "re.target_member_id IS NULL"
-        params: list[object] = [group_id, event_type, *source_ids]
+        params: list[object] = [
+            self.MAX_RELATION_EVENT_CONTENT_CHARS + 1,
+            group_id,
+            event_type,
+            *source_ids,
+        ]
         if target_member_id is not None:
             target_ids = self._member_descendant_ids(connection, target_member_id)
             target_placeholders = ", ".join("?" for _ in target_ids)
@@ -2146,7 +2240,7 @@ class GroupMemoryDatabase:
         rows = connection.execute(
             f"""
             SELECT re.id, re.source_member_id, re.target_member_id, re.event_type,
-                   re.content, re.event_timestamp, re.confidence, re.source_type,
+                   substr(re.content, 1, ?), re.event_timestamp, re.confidence, re.source_type,
                    re.created_at,
                    su.external_user_id, COALESCE(NULLIF(sm.canonical_name, ''), su.nickname, ''),
                    tu.external_user_id, COALESCE(NULLIF(tm.canonical_name, ''), tu.nickname, '')
@@ -2172,7 +2266,9 @@ class GroupMemoryDatabase:
             events.append({
                 "id": event_id,
                 "event_type": str(row[3]),
-                "content": str(row[4]),
+                "content": self._preview_relation_text(
+                    row[4], self.MAX_RELATION_EVENT_CONTENT_CHARS
+                ),
                 "event_timestamp": timestamp,
                 "confidence": float(row[6]),
                 "source_type": str(row[7]),
@@ -2195,6 +2291,14 @@ class GroupMemoryDatabase:
             }
         return {"events": events, "next_cursor": next_cursor}
 
+    @staticmethod
+    def _preview_relation_text(value: object, maximum: int) -> str:
+        """Bound WebUI strings without changing the original SQLite evidence."""
+        text = str(value or "")
+        if len(text) <= maximum:
+            return text
+        return f"{text[: max(maximum - 1, 0)]}…"
+
     def _relationship_aggregates_for_group(
         self,
         connection: sqlite3.Connection,
@@ -2203,57 +2307,135 @@ class GroupMemoryDatabase:
         event_types: list[str],
         source_types: list[str],
     ) -> list[dict[str, object]]:
-        rows = connection.execute(
-            """
-            SELECT id, source_member_id, target_member_id, event_type, content,
-                   event_timestamp, source_type
-            FROM "relationship_events"
-            WHERE group_id = ?
-            ORDER BY event_timestamp DESC, id DESC
+        """Build bounded live summaries without materializing raw event history."""
+        cutoff_timestamp = int(time.time()) - self.RELATIONSHIP_LIVE_WINDOW_SECONDS
+        where_clauses = ["re.group_id = ?", "re.event_timestamp >= ?"]
+        where_params: list[object] = [group_id, cutoff_timestamp]
+        if event_types:
+            placeholders = ", ".join("?" for _ in event_types)
+            where_clauses.append(f"re.event_type IN ({placeholders})")
+            where_params.extend(event_types)
+        if source_types:
+            placeholders = ", ".join("?" for _ in source_types)
+            where_clauses.append(f"re.source_type IN ({placeholders})")
+            where_params.extend(source_types)
+
+        cursor = connection.execute(
+            f"""
+            SELECT
+                re.source_member_id,
+                re.target_member_id,
+                re.event_type,
+                re.source_type,
+                COUNT(*) AS event_count,
+                MIN(re.event_timestamp) AS first_time,
+                MAX(re.event_timestamp) AS last_time,
+                (
+                    SELECT latest.id
+                    FROM "relationship_events" AS latest
+                    WHERE latest.group_id = re.group_id
+                      AND latest.source_member_id = re.source_member_id
+                      AND latest.target_member_id IS re.target_member_id
+                      AND latest.event_type = re.event_type
+                      AND latest.source_type = re.source_type
+                      AND latest.event_timestamp >= ?
+                    ORDER BY latest.event_timestamp DESC, latest.id DESC
+                    LIMIT 1
+                ) AS latest_event_id,
+                (
+                    SELECT substr(latest.content, 1, ?)
+                    FROM "relationship_events" AS latest
+                    WHERE latest.group_id = re.group_id
+                      AND latest.source_member_id = re.source_member_id
+                      AND latest.target_member_id IS re.target_member_id
+                      AND latest.event_type = re.event_type
+                      AND latest.source_type = re.source_type
+                      AND latest.event_timestamp >= ?
+                    ORDER BY latest.event_timestamp DESC, latest.id DESC
+                    LIMIT 1
+                ) AS last_evidence
+            FROM "relationship_events" AS re
+            WHERE {' AND '.join(where_clauses)}
+            GROUP BY
+                re.source_member_id,
+                re.target_member_id,
+                re.event_type,
+                re.source_type
+            ORDER BY last_time DESC, event_count DESC
+            LIMIT ?
             """,
-            (group_id,),
-        ).fetchall()
+            (
+                cutoff_timestamp,
+                self.MAX_RELATION_EVIDENCE_PREVIEW_CHARS + 1,
+                cutoff_timestamp,
+                *where_params,
+                self.MAX_RELATION_PREAGGREGATE_ROWS,
+            ),
+        )
         grouped: dict[tuple[int, int | None, str], dict[str, object]] = {}
-        for row in rows:
-            event_type = str(row[3])
-            source_type = str(row[6])
-            if event_types and event_type not in event_types:
-                continue
-            if source_types and source_type not in source_types:
-                continue
-            source_member_id = self._canonical_member_id(connection, int(row[1]))
+        member_nodes: dict[int, dict[str, object]] = {}
+        for row in cursor:
+            source_member_id = self._canonical_member_id(connection, int(row[0]))
             target_member_id = (
-                None if row[2] is None
-                else self._canonical_member_id(connection, int(row[2]))
+                None if row[1] is None
+                else self._canonical_member_id(connection, int(row[1]))
             )
+            event_type = str(row[2])
+            source_type = str(row[3])
+            event_count = int(row[4])
+            first_time = int(row[5])
+            last_time = int(row[6])
+            latest_event_id = int(row[7] or 0)
             key = (source_member_id, target_member_id, event_type)
             aggregate = grouped.get(key)
             if aggregate is None:
-                source = self._network_member_node(connection, source_member_id)
-                target = (
-                    None if target_member_id is None
-                    else self._network_member_node(connection, target_member_id)
-                )
+                source = member_nodes.get(source_member_id)
+                if source is None:
+                    source = self._network_member_node(connection, source_member_id)
+                    member_nodes[source_member_id] = source
+                target = None
+                if target_member_id is not None:
+                    target = member_nodes.get(target_member_id)
+                    if target is None:
+                        target = self._network_member_node(connection, target_member_id)
+                        member_nodes[target_member_id] = target
                 aggregate = {
                     "source_member_id": source_member_id,
                     "target_member_id": target_member_id,
                     "event_type": event_type,
                     "count": 0,
-                    "first_time": int(row[5]),
-                    "last_time": int(row[5]),
-                    "last_evidence": str(row[4]),
+                    "first_time": first_time,
+                    "last_time": last_time,
+                    "last_evidence": self._preview_relation_text(
+                        row[8], self.MAX_RELATION_EVIDENCE_PREVIEW_CHARS
+                    ),
+                    "_last_evidence_id": latest_event_id,
                     "source_counts": {},
                     "source": source,
                     "target": target,
                 }
                 grouped[key] = aggregate
-            aggregate["count"] = int(aggregate["count"]) + 1
-            aggregate["first_time"] = min(int(aggregate["first_time"]), int(row[5]))
-            aggregate["last_time"] = max(int(aggregate["last_time"]), int(row[5]))
+            aggregate["count"] = int(aggregate["count"]) + event_count
+            aggregate["first_time"] = min(int(aggregate["first_time"]), first_time)
+            if (
+                last_time > int(aggregate["last_time"])
+                or (
+                    last_time == int(aggregate["last_time"])
+                    and latest_event_id > int(aggregate["_last_evidence_id"])
+                )
+            ):
+                aggregate["last_time"] = last_time
+                aggregate["_last_evidence_id"] = latest_event_id
+                aggregate["last_evidence"] = self._preview_relation_text(
+                    row[8], self.MAX_RELATION_EVIDENCE_PREVIEW_CHARS
+                )
             source_counts = aggregate["source_counts"]
-            source_counts[source_type] = int(source_counts.get(source_type, 0)) + 1
+            source_counts[source_type] = int(source_counts.get(source_type, 0)) + event_count
+        aggregates = list(grouped.values())
+        for aggregate in aggregates:
+            aggregate.pop("_last_evidence_id", None)
         return sorted(
-            grouped.values(),
+            aggregates,
             key=lambda item: (int(item["count"]), int(item["last_time"])),
             reverse=True,
         )
