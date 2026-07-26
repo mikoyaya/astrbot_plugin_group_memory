@@ -232,7 +232,11 @@ textarea:focus, .tag-editor input:focus { border-color: var(--accent); }
   min-height: 420px;
   touch-action: none;
   cursor: grab;
+  user-select: none;
+  -webkit-user-select: none;
 }
+.network-canvas *, .network-canvas text { user-select: none; -webkit-user-select: none; }
+body.is-network-dragging, body.is-network-dragging * { user-select: none !important; -webkit-user-select: none !important; }
 .network-canvas.is-panning, .network-canvas.is-dragging-node { cursor: grabbing; }
 .network-svg-background { fill: transparent; }
 .network-grid-line { fill: none; stroke: rgba(173, 207, 240, 0.1); stroke-width: 1; }
@@ -261,6 +265,7 @@ textarea:focus, .tag-editor input:focus { border-color: var(--accent); }
   stroke-width: 4px;
   stroke-linejoin: round;
   pointer-events: none;
+  user-select: none;
 }
 .network-node { cursor: pointer; outline: none; transform-origin: center; }
 .network-node .network-node-core {
@@ -278,10 +283,13 @@ textarea:focus, .tag-editor input:focus { border-color: var(--accent); }
   animation: network-pulse 2.4s ease-in-out infinite;
 }
 .network-node.center .network-node-core {
-  fill: #0f8d80;
-  stroke: #c7fff3;
+  fill: #d99b2b;
+  stroke: #d8fff8;
   stroke-width: 3.4;
 }
+.network-node.level-1 .network-node-core { fill: #147f72; stroke: #a9ffe7; }
+.network-node.level-2 .network-node-core { fill: #285677; stroke: #a9d7ff; }
+.network-node.level-3 .network-node-core { fill: #33475d; stroke: #8297ae; opacity: 0.82; }
 .network-node.mentioned-only .network-node-core { fill: #593f1b; stroke: #ffc96a; }
 .network-node:hover .network-node-core,
 .network-node:focus-visible .network-node-core,
@@ -304,6 +312,7 @@ textarea:focus, .tag-editor input:focus { border-color: var(--accent); }
   stroke-width: 3px;
   stroke-linejoin: round;
   pointer-events: none;
+  user-select: none;
 }
 .network-node.center .network-node-label { fill: #fff; }
 .network-canvas-hint {
@@ -337,6 +346,15 @@ textarea:focus, .tag-editor input:focus { border-color: var(--accent); }
   pointer-events: none;
   backdrop-filter: blur(10px);
 }
+.network-edge.semantic-friend line { stroke: #55dfae; }
+.network-edge.semantic-ordinary line { stroke: #83a9d8; }
+.network-edge.semantic-distant line { stroke: #8b99aa; }
+.network-edge.semantic-bickering line { stroke: #ff855f; }
+.network-edge.semantic-hostile line { stroke: #bc3e50; }
+.network-edge.semantic-caring line { stroke: #8ce9a7; }
+.network-edge.semantic-stranger line { stroke: #77869a; }
+.network-edge.semantic-pending line { stroke: #91a6c2; stroke-dasharray: 6 5; }
+.network-edge.semantic-pending .network-edge-label { fill: #b8c8db; }
 .detail-summary-card {
   border-color: color-mix(in srgb, var(--accent) 25%, var(--border)) !important;
   background: linear-gradient(145deg, color-mix(in srgb, var(--accent) 10%, var(--surface-muted)), var(--surface-muted)) !important;

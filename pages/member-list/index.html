@@ -93,12 +93,13 @@
           </label>
           <button id="network-load-button" class="command-button" type="button">刷新关系网</button>
           <button id="network-expand-button" class="secondary-button" type="button" hidden>展开更多</button>
+          <button id="network-low-relevance-button" class="secondary-button" type="button" hidden>显示低相关节点</button>
           <button id="network-reset-view-button" class="secondary-button" type="button">重置视图</button>
         </div>
         <p id="network-status" class="network-status" aria-live="polite">请选择一名成员作为关系网中心。</p>
         <div class="network-canvas-wrap">
           <svg id="network-canvas" class="network-canvas" viewBox="0 0 980 620" role="img" aria-label="成员关系网：滚轮缩放，拖拽空白区域平移，拖拽节点调整布局"></svg>
-          <p class="network-canvas-hint" aria-hidden="true">滚轮缩放 · 拖拽空白处平移 · 拖拽节点调整布局</p>
+          <p class="network-canvas-hint" aria-hidden="true">滚轮缩放 · 拖拽空白处平移 · 拖拽非中心节点调整布局</p>
           <div id="network-tooltip" class="network-tooltip" role="tooltip" hidden></div>
         </div>
         <aside id="network-empty" class="network-empty">

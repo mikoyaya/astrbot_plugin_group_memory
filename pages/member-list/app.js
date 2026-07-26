@@ -1,3 +1,11 @@
+import {
+  RELATIONSHIP_WINDOW_SECONDS,
+  deriveRelationshipSemantics,
+  intensityLabel,
+  pendingRelationshipSemantics,
+  semanticLabel,
+} from "./relationship-semantics.mjs";
+
 const bridge = window.AstrBotPluginPage;
 const refreshButton = document.getElementById("refresh-button");
 const searchInput = document.getElementById("search-input");
@@ -54,6 +62,7 @@ const networkTypeInput = document.getElementById("network-type-input");
 const networkSourceInput = document.getElementById("network-source-input");
 const networkLoadButton = document.getElementById("network-load-button");
 const networkExpandButton = document.getElementById("network-expand-button");
+const networkLowRelevanceButton = document.getElementById("network-low-relevance-button");
 const networkResetViewButton = document.getElementById("network-reset-view-button");
 const networkStatus = document.getElementById("network-status");
 const networkCanvas = document.getElementById("network-canvas");
@@ -70,6 +79,7 @@ let selectedMember = null;
 let networkCenter = null;
 let networkData = null;
 let networkExpanded = false;
+let networkLowRelevanceVisible = false;
 let activeAggregate = null;
 let activeAggregateIdentity = null;
 let evidenceCursor = null;
@@ -77,11 +87,15 @@ let networkGraph = null;
 let networkViewport = { scale: 1, x: 0, y: 0 };
 let networkPointerState = null;
 let suppressNetworkNodeClickUntil = 0;
+let memberRelationshipAnalysisToken = 0;
 
 const NETWORK_WIDTH = 980;
 const NETWORK_HEIGHT = 620;
-const NETWORK_MIN_SCALE = 0.55;
-const NETWORK_MAX_SCALE = 2.4;
+const NETWORK_MIN_SCALE = 0.82;
+const NETWORK_MAX_SCALE = 2.2;
+const NETWORK_DRAG_THRESHOLD_PX = 6;
+const NETWORK_FIRST_LAYER_LIMIT = 6;
+const NETWORK_SECOND_LAYER_LIMIT = 12;
 
 function text(value, fallback = "") {
   return value === undefined || value === null ? fallback : String(value);
@@ -307,22 +321,85 @@ function renderEvents(member) {
     relationshipEventList.append(recordRow({ title: "暂无关系事件", meta: "可人工记录，也会保存唯一明确的 @提及" }));
     return;
   }
+  const pairMap = new Map();
   aggregates.forEach((aggregate) => {
+    if (aggregate.target_member_id === null || aggregate.target_member_id === undefined) {
+      const key = `unpaired:${aggregate.source_member_id}:${aggregate.event_type}`;
+      pairMap.set(key, { aggregates: [aggregate], unpaired: true });
+      return;
+    }
+    const key = pairKey(aggregate.source_member_id, aggregate.target_member_id);
+    const entry = pairMap.get(key) || { aggregates: [], unpaired: false };
+    entry.aggregates.push(aggregate);
+    pairMap.set(key, entry);
+  });
+  const pairs = [];
+  [...pairMap.values()].forEach((entry) => {
+    if (entry.unpaired) {
+      const aggregate = entry.aggregates[0];
+      const row = recordRow({
+        title: `${eventTypeLabel(aggregate.event_type)} · ${aggregateLabel(aggregate)}`,
+        meta: `来源：${sourceCountsLabel(aggregate.source_counts)}；最近：${formatTimestamp(aggregate.last_time)}；无明确目标成员`,
+      });
+      row.classList.add("interactive-record");
+      row.tabIndex = 0;
+      row.addEventListener("click", () => openAggregate(aggregate));
+      relationshipEventList.append(row);
+      return;
+    }
+    const source = entry.aggregates[0].source || selectedMember;
+    const target = entry.aggregates[0].target || { member_id: entry.aggregates[0].target_member_id };
+    const pair = {
+      id: `detail:${pairKey(source.member_id, target.member_id)}`,
+      memberA: Number(source.member_id) < Number(target.member_id) ? source : target,
+      memberB: Number(source.member_id) < Number(target.member_id) ? target : source,
+      aggregates: entry.aggregates,
+      analysis: pendingRelationshipSemantics(),
+    };
+    pairs.push(pair);
     const row = recordRow({
-      title: `${eventTypeLabel(aggregate.event_type)} · ${aggregateLabel(aggregate)}`,
-      meta: `来源：${sourceCountsLabel(aggregate.source_counts)}；首次：${formatTimestamp(aggregate.first_time)}；最近：${formatTimestamp(aggregate.last_time)}；最后证据：${text(aggregate.last_evidence, "暂无")}`,
+      title: `待判断 · 弱 · ${memberDisplayName(pair.memberA)} ↔ ${memberDisplayName(pair.memberB)}`,
+      meta: `正在按成员对分析近 90 天结构化证据；聚合事件 ${entry.aggregates.length} 类。`,
     });
+    row.dataset.pairId = pair.id;
     row.classList.add("interactive-record");
     row.tabIndex = 0;
-    row.addEventListener("click", () => openAggregate(aggregate));
+    row.addEventListener("click", () => openRelationshipPair(pair));
     row.addEventListener("keydown", (event) => {
       if (event.key === "Enter" || event.key === " ") {
         event.preventDefault();
-        openAggregate(aggregate);
+        openRelationshipPair(pair);
       }
     });
     relationshipEventList.append(row);
   });
+  analyzeMemberRelationshipPairs(pairs, member);
+}
+
+async function analyzeMemberRelationshipPairs(pairs, member) {
+  const identity = memberIdentity(member);
+  const token = ++memberRelationshipAnalysisToken;
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  const cutoffTimestamp = nowSeconds - RELATIONSHIP_WINDOW_SECONDS;
+  try {
+    await mapConcurrent(pairs, 1, async (pair) => {
+      const directionalEvents = await mapConcurrent(pair.aggregates, 3,
+        (aggregate) => loadAggregateWindowEvents(aggregate, identity, cutoffTimestamp));
+      if (token !== memberRelationshipAnalysisToken || !selectedMember || !sameMember(selectedMember, member)) return;
+      pair.analysis = deriveRelationshipSemantics({
+        memberA: pair.memberA,
+        memberB: pair.memberB,
+        directionalEvents,
+        nowSeconds,
+      });
+      const row = [...relationshipEventList.children].find((item) => item.dataset.pairId === pair.id);
+      if (!row) return;
+      row.querySelector("strong").textContent = `${pair.analysis.label} · ${memberDisplayName(pair.memberA)} ↔ ${memberDisplayName(pair.memberB)}`;
+      row.querySelector("span").textContent = `近 90 天证据 ${pair.analysis.evidence_count} 条；最近：${formatTimestamp(pair.analysis.recent_timestamp)}；${pair.analysis.reasons.join(" ")}`;
+    });
+  } catch {
+    // The existing relationship rows remain available as a safe fallback.
+  }
 }
 
 function renderLegacyTags(member) {
@@ -464,75 +541,192 @@ function svgElement(name, attributes = {}) {
   return element;
 }
 
-function nodePositions(nodes, centerMemberId) {
-  const width = NETWORK_WIDTH;
-  const height = NETWORK_HEIGHT;
-  const center = nodes.find((node) => Number(node.member_id) === Number(centerMemberId));
-  const positions = new Map();
-  if (center) positions.set(Number(center.member_id), { x: width / 2, y: height / 2 });
-  const others = nodes.filter((node) => Number(node.member_id) !== Number(centerMemberId));
-  others.forEach((node, index) => {
-    const angle = (-Math.PI / 2) + ((Math.PI * 2 * index) / Math.max(others.length, 1));
-    const radius = Math.min(225, 95 + others.length * 7);
-    positions.set(Number(node.member_id), {
-      x: width / 2 + Math.cos(angle) * radius,
-      y: height / 2 + Math.sin(angle) * radius,
-    });
-  });
-  return positions;
-}
-
-function relationshipColor(eventType) {
-  const colors = {
-    mention: "#57d1ff",
-    evaluation: "#ab8cff",
-    praise: "#ffd166",
-    complaint: "#ff7a8a",
-    reported: "#ffad66",
-    confirmation: "#5ee6a8",
-  };
-  return colors[text(eventType)] || "#75dcc8";
-}
-
-function escapeSelectorValue(value) {
-  return String(value).replace(/([\\"'\[\]#.:])/g, "\\$1");
-}
-
 function memberDisplayName(member) {
   return member?.label || member?.nickname || member?.user_id || member?.external_user_id || "未命名成员";
 }
 
-function edgeMember(edge, role) {
-  const member = edge?.[role];
-  if (member && typeof member === "object") return member;
-  const memberId = role === "source" ? edge?.source_member_id : edge?.target_member_id;
-  return networkGraph?.nodes.find((node) => Number(node.member_id) === Number(memberId)) || null;
+function semanticColor(semantic) {
+  const colors = {
+    friend: "#55dfae",
+    ordinary: "#83a9d8",
+    distant: "#8b99aa",
+    bickering: "#ff855f",
+    hostile: "#bc3e50",
+    caring: "#8ce9a7",
+    stranger: "#77869a",
+    pending: "#91a6c2",
+  };
+  return colors[semantic] || colors.pending;
 }
 
-function memberRelationshipCount(memberId, edges) {
-  return edges.filter((edge) => Number(edge.source_member_id) === Number(memberId)
-    || Number(edge.target_member_id) === Number(memberId))
-    .reduce((total, edge) => total + Number(edge.count || 0), 0);
+function semanticClass(semantic) {
+  return `semantic-${text(semantic, "pending")}`;
 }
 
-function edgeTooltip(edge) {
-  const source = edgeMember(edge, "source");
-  const target = edgeMember(edge, "target");
+function aggregateKey(aggregate) {
   return [
-    `${eventTypeLabel(edge.event_type)} · x${edge.count || 0}`,
-    `${memberDisplayName(source)} → ${memberDisplayName(target)}`,
-    `最近：${formatTimestamp(edge.last_time)}`,
-    `来源：${sourceCountsLabel(edge.source_counts)}`,
+    Number(aggregate.source_member_id),
+    Number(aggregate.target_member_id),
+    text(aggregate.event_type),
+  ].join(":");
+}
+
+function pairKey(firstMemberId, secondMemberId) {
+  return [Number(firstMemberId), Number(secondMemberId)].sort((left, right) => left - right).join(":");
+}
+
+function aggregateMember(aggregate, role, nodesById) {
+  const member = aggregate[role];
+  if (member && typeof member === "object") return member;
+  const memberId = role === "source" ? aggregate.source_member_id : aggregate.target_member_id;
+  return nodesById.get(Number(memberId)) || {
+    member_id: Number(memberId),
+    label: role === "source" ? aggregate.source_user_id : aggregate.target_user_id,
+  };
+}
+
+function buildRelationshipPairs(aggregates, nodes = []) {
+  const nodesById = new Map(nodes.map((node) => [Number(node.member_id), node]));
+  const pairs = new Map();
+  (aggregates || []).forEach((aggregate) => {
+    if (aggregate.target_member_id === null || aggregate.target_member_id === undefined) return;
+    const source = aggregateMember(aggregate, "source", nodesById);
+    const target = aggregateMember(aggregate, "target", nodesById);
+    const key = pairKey(source.member_id, target.member_id);
+    let pair = pairs.get(key);
+    if (!pair) {
+      const [firstMemberId] = key.split(":").map(Number);
+      const memberA = Number(source.member_id) === firstMemberId ? source : target;
+      const memberB = Number(source.member_id) === firstMemberId ? target : source;
+      pair = {
+        id: `pair:${key}`,
+        key,
+        memberA,
+        memberB,
+        aggregates: [],
+        weight: 0,
+        last_time: 0,
+        analysis: pendingRelationshipSemantics(),
+        level: 3,
+      };
+      pairs.set(key, pair);
+    }
+    pair.aggregates.push(aggregate);
+    pair.weight += Number(aggregate.count || 0);
+    pair.last_time = Math.max(pair.last_time, Number(aggregate.last_time || 0));
+  });
+  return [...pairs.values()];
+}
+
+function sortByWeight(items) {
+  return [...items].sort((left, right) => Number(right.weight || 0) - Number(left.weight || 0)
+    || Number(right.last_time || 0) - Number(left.last_time || 0)
+    || Number(left.member_id || left.memberA?.member_id || 0) - Number(right.member_id || right.memberA?.member_id || 0));
+}
+
+function deriveNetworkLevels(nodes, pairs, centerMemberId) {
+  const centerId = Number(centerMemberId);
+  const direct = new Map();
+  const related = new Map();
+  pairs.forEach((pair) => {
+    const memberIds = [Number(pair.memberA.member_id), Number(pair.memberB.member_id)];
+    memberIds.forEach((memberId) => {
+      if (memberId === centerId) return;
+      const current = related.get(memberId) || { member_id: memberId, weight: 0, last_time: 0, direct: false };
+      current.weight += pair.weight;
+      current.last_time = Math.max(current.last_time, pair.last_time);
+      related.set(memberId, current);
+    });
+    if (memberIds.includes(centerId)) {
+      const otherId = memberIds.find((memberId) => memberId !== centerId);
+      const current = direct.get(otherId) || { member_id: otherId, weight: 0, last_time: 0, direct: true };
+      current.weight += pair.weight;
+      current.last_time = Math.max(current.last_time, pair.last_time);
+      direct.set(otherId, current);
+    }
+  });
+  const firstLayerIds = new Set(sortByWeight([...direct.values()])
+    .slice(0, NETWORK_FIRST_LAYER_LIMIT).map((item) => item.member_id));
+  const secondCandidates = sortByWeight([...related.values()]
+    .filter((item) => !firstLayerIds.has(item.member_id)));
+  const secondLayerIds = new Set(secondCandidates
+    .slice(0, NETWORK_SECOND_LAYER_LIMIT).map((item) => item.member_id));
+  const levels = new Map([[centerId, 0]]);
+  nodes.forEach((node) => {
+    const memberId = Number(node.member_id);
+    if (memberId === centerId) return;
+    levels.set(memberId, firstLayerIds.has(memberId) ? 1 : secondLayerIds.has(memberId) ? 2 : 3);
+  });
+  pairs.forEach((pair) => {
+    pair.level = Math.max(levels.get(Number(pair.memberA.member_id)) || 3, levels.get(Number(pair.memberB.member_id)) || 3);
+  });
+  return levels;
+}
+
+function positionLayer(nodes, radiusX, radiusY, positions) {
+  const centerX = NETWORK_WIDTH / 2;
+  const centerY = NETWORK_HEIGHT / 2;
+  nodes.forEach((node, index) => {
+    const angle = (-Math.PI / 2) + ((Math.PI * 2 * index) / Math.max(nodes.length, 1));
+    positions.set(Number(node.member_id), {
+      x: centerX + Math.cos(angle) * radiusX,
+      y: centerY + Math.sin(angle) * radiusY,
+    });
+  });
+}
+
+function nodePositions(nodes, centerMemberId, levels, pairs) {
+  const positions = new Map();
+  const centerId = Number(centerMemberId);
+  positions.set(centerId, { x: NETWORK_WIDTH / 2, y: NETWORK_HEIGHT / 2 });
+  [1, 2, 3].forEach((level) => {
+    const layerNodes = nodes.filter((node) => Number(node.member_id) !== centerId
+      && levels.get(Number(node.member_id)) === level)
+      .sort((left, right) => {
+        const leftWeight = pairs.filter((pair) => Number(pair.memberA.member_id) === Number(left.member_id)
+          || Number(pair.memberB.member_id) === Number(left.member_id)).reduce((sum, pair) => sum + pair.weight, 0);
+        const rightWeight = pairs.filter((pair) => Number(pair.memberA.member_id) === Number(right.member_id)
+          || Number(pair.memberB.member_id) === Number(right.member_id)).reduce((sum, pair) => sum + pair.weight, 0);
+        return rightWeight - leftWeight || Number(right.member_id) - Number(left.member_id);
+      });
+    const radii = {
+      1: [235, 145],
+      2: [365, 225],
+      3: [445, 270],
+    }[level];
+    positionLayer(layerNodes, radii[0], radii[1], positions);
+  });
+  return positions;
+}
+
+function pairIncludesMember(pair, memberId) {
+  return Number(pair.memberA.member_id) === Number(memberId)
+    || Number(pair.memberB.member_id) === Number(memberId);
+}
+
+function pairTooltip(pair) {
+  const analysis = pair.analysis || pendingRelationshipSemantics();
+  const [aToB, bToA] = [analysis.directional_counts?.aToB || 0, analysis.directional_counts?.bToA || 0];
+  return [
+    `${memberDisplayName(pair.memberA)} ↔ ${memberDisplayName(pair.memberB)}`,
+    `关系：${analysis.label}`,
+    `双向互动：${analysis.is_bidirectional ? "是" : "否"}（${aToB}/${bToA}）`,
+    `近 90 天证据：${analysis.evidence_count || 0} 条`,
+    `最近互动：${formatTimestamp(analysis.recent_timestamp)}`,
+    ...(analysis.reasons || []).slice(0, 3),
   ].join("\n");
 }
 
-function nodeTooltip(node, edges) {
+function nodeTooltip(node) {
   const identity = node.user_id || node.external_user_id || "暂无";
+  const pairs = networkGraph?.pairs.filter((pair) => pairIncludesMember(pair, node.member_id)) || [];
+  const strongest = sortByWeight(pairs)[0];
   return [
     memberDisplayName(node),
     `QQ：${identity}`,
     `状态：${memberStatusLabel(node.member_status)}`,
-    `关联互动：${memberRelationshipCount(node.member_id, edges)} 次`,
+    `关联成员对：${pairs.length} 个`,
+    strongest ? `最强关系：${strongest.analysis.label}` : "暂无关系证据",
   ].join("\n");
 }
 
@@ -571,13 +765,37 @@ function resetNetworkViewport() {
   updateNetworkViewport();
 }
 
+function resetNetworkLayout() {
+  if (!networkGraph) return;
+  networkGraph.positions = nodePositions(
+    networkGraph.nodes,
+    networkGraph.centerMemberId,
+    networkGraph.levels,
+    networkGraph.pairs,
+  );
+  networkGraph.nodeElements.forEach((_, memberId) => updateNodeGeometry(memberId));
+  const centerPosition = networkGraph.positions.get(Number(networkGraph.centerMemberId));
+  if (centerPosition) {
+    centerPosition.x = NETWORK_WIDTH / 2;
+    centerPosition.y = NETWORK_HEIGHT / 2;
+    updateNodeGeometry(networkGraph.centerMemberId);
+  }
+  applyNetworkVisibility();
+}
+
+function resetNetworkView() {
+  networkLowRelevanceVisible = false;
+  resetNetworkViewport();
+  resetNetworkLayout();
+}
+
 function updateEdgeGeometry(edgeId) {
   if (!networkGraph) return;
-  const edge = networkGraph.edges.find((item) => item.id === edgeId);
-  if (!edge) return;
-  const from = networkGraph.positions.get(Number(edge.source_member_id));
-  const to = networkGraph.positions.get(Number(edge.target_member_id));
-  const element = networkGraph.edgeElements.get(edgeId);
+  const pair = networkGraph.pairs.find((item) => item.id === edgeId);
+  if (!pair) return;
+  const from = networkGraph.positions.get(Number(pair.memberA.member_id));
+  const to = networkGraph.positions.get(Number(pair.memberB.member_id));
+  const element = networkGraph.pairElements.get(edgeId);
   if (!from || !to || !element) return;
   const line = element.querySelector("line");
   const label = element.querySelector("text");
@@ -601,10 +819,9 @@ function updateNodeGeometry(memberId) {
   const label = element.querySelector("text");
   label.setAttribute("x", position.x);
   label.setAttribute("y", position.y + 5);
-  networkGraph.edges.forEach((edge) => {
-    if (Number(edge.source_member_id) === Number(memberId)
-      || Number(edge.target_member_id) === Number(memberId)) {
-      updateEdgeGeometry(edge.id);
+  networkGraph.pairs.forEach((pair) => {
+    if (pairIncludesMember(pair, memberId)) {
+      updateEdgeGeometry(pair.id);
     }
   });
 }
@@ -613,17 +830,14 @@ function setNetworkFocus(memberId = null, edgeId = null) {
   if (!networkGraph) return;
   networkGraph.nodeElements.forEach((element, id) => {
     const connected = !memberId || Number(id) === Number(memberId)
-      || networkGraph.edges.some((edge) => (Number(edge.source_member_id) === Number(memberId)
-        || Number(edge.target_member_id) === Number(memberId))
-        && (Number(edge.source_member_id) === Number(id) || Number(edge.target_member_id) === Number(id)));
+      || networkGraph.pairs.some((pair) => pairIncludesMember(pair, memberId) && pairIncludesMember(pair, id));
     element.classList.toggle("is-dimmed", Boolean(memberId) && !connected);
     element.classList.toggle("is-highlighted", Boolean(memberId) && Number(id) === Number(memberId));
   });
-  networkGraph.edgeElements.forEach((element, id) => {
-    const edge = networkGraph.edges.find((item) => item.id === id);
+  networkGraph.pairElements.forEach((element, id) => {
+    const pair = networkGraph.pairs.find((item) => item.id === id);
     const connected = edgeId ? id === edgeId : !memberId
-      || Number(edge.source_member_id) === Number(memberId)
-      || Number(edge.target_member_id) === Number(memberId);
+      || pairIncludesMember(pair, memberId);
     element.classList.toggle("is-dimmed", !connected);
     element.classList.toggle("is-highlighted", Boolean(edgeId) && id === edgeId);
   });
@@ -635,7 +849,7 @@ function clearNetworkFocus() {
   networkGraph.nodeElements.forEach((element) => {
     element.classList.remove("is-dimmed", "is-highlighted");
   });
-  networkGraph.edgeElements.forEach((element) => {
+  networkGraph.pairElements.forEach((element) => {
     element.classList.remove("is-dimmed", "is-highlighted");
   });
 }
@@ -655,6 +869,25 @@ function graphPositionFromEvent(event) {
     x: (point.x - networkViewport.x) / networkViewport.scale,
     y: (point.y - networkViewport.y) / networkViewport.scale,
   };
+}
+
+function screenDistance(pointerState, event) {
+  return Math.hypot(event.clientX - pointerState.startClientX, event.clientY - pointerState.startClientY);
+}
+
+function applyNetworkVisibility() {
+  if (!networkGraph) return;
+  networkGraph.nodeElements.forEach((element, memberId) => {
+    const level = networkGraph.levels.get(Number(memberId)) || 3;
+    element.hidden = level === 3 && !networkLowRelevanceVisible;
+  });
+  networkGraph.pairElements.forEach((element, pairId) => {
+    const pair = networkGraph.pairs.find((item) => item.id === pairId);
+    element.hidden = !networkLowRelevanceVisible && pair.level === 3;
+  });
+  const lowCount = [...networkGraph.levels.values()].filter((level) => level === 3).length;
+  networkLowRelevanceButton.hidden = lowCount === 0;
+  networkLowRelevanceButton.textContent = networkLowRelevanceVisible ? "收起低相关节点" : "显示低相关节点";
 }
 
 function addNetworkPointerInteractions() {
@@ -677,9 +910,27 @@ function addNetworkPointerInteractions() {
     const nodeElement = event.target.closest(".network-node");
     if (!nodeElement && event.target.closest(".network-edge")) return;
     const point = nodeElement ? graphPositionFromEvent(event) : graphPointFromEvent(event);
-    networkPointerState = nodeElement
-      ? { kind: "node", memberId: Number(nodeElement.dataset.memberId), point, moved: false }
-      : { kind: "pan", point, startX: networkViewport.x, startY: networkViewport.y, moved: false };
+    const memberId = Number(nodeElement?.dataset.memberId);
+    const isCenter = nodeElement && memberId === Number(networkGraph.centerMemberId);
+    networkPointerState = nodeElement && !isCenter
+      ? {
+        kind: "node", memberId, point,
+        startClientX: event.clientX, startClientY: event.clientY,
+        moved: false,
+      }
+      : nodeElement
+        ? {
+          kind: "center", memberId, point,
+          startClientX: event.clientX, startClientY: event.clientY,
+          moved: false,
+        }
+      : {
+        kind: "pan", point, startX: networkViewport.x, startY: networkViewport.y,
+        startClientX: event.clientX, startClientY: event.clientY,
+        moved: false,
+    };
+    event.preventDefault();
+    if (networkPointerState.kind === "node") document.body.classList.add("is-network-dragging");
     networkCanvas.setPointerCapture(event.pointerId);
     networkCanvas.classList.toggle("is-dragging-node", networkPointerState.kind === "node");
     networkCanvas.classList.toggle("is-panning", networkPointerState.kind === "pan");
@@ -687,49 +938,62 @@ function addNetworkPointerInteractions() {
 
   networkCanvas.addEventListener("pointermove", (event) => {
     if (!networkPointerState) return;
-    const point = networkPointerState.kind === "node"
+    const point = networkPointerState.kind === "node" || networkPointerState.kind === "center"
       ? graphPositionFromEvent(event) : graphPointFromEvent(event);
-    const movement = Math.hypot(point.x - networkPointerState.point.x, point.y - networkPointerState.point.y);
-    if (movement > 3) networkPointerState.moved = true;
+    if (screenDistance(networkPointerState, event) > NETWORK_DRAG_THRESHOLD_PX) {
+      networkPointerState.moved = true;
+    }
+    if (networkPointerState.moved) event.preventDefault();
     if (networkPointerState.kind === "node") {
+      if (!networkPointerState.moved) return;
       const position = networkGraph.positions.get(networkPointerState.memberId);
       position.x = Math.min(NETWORK_WIDTH - 42, Math.max(42, point.x));
       position.y = Math.min(NETWORK_HEIGHT - 42, Math.max(42, point.y));
       updateNodeGeometry(networkPointerState.memberId);
       return;
     }
-    networkViewport.x = networkPointerState.startX + point.x - networkPointerState.point.x;
-    networkViewport.y = networkPointerState.startY + point.y - networkPointerState.point.y;
-    updateNetworkViewport();
+    if (networkPointerState.kind === "pan" && networkPointerState.moved) {
+      networkViewport.x = networkPointerState.startX + point.x - networkPointerState.point.x;
+      networkViewport.y = networkPointerState.startY + point.y - networkPointerState.point.y;
+      updateNetworkViewport();
+    }
   });
 
   networkCanvas.addEventListener("pointerup", (event) => {
     if (!networkPointerState) return;
-    if (networkPointerState.kind === "node" && networkPointerState.moved) {
-      suppressNetworkNodeClickUntil = Date.now() + 180;
+    const pointerState = networkPointerState;
+    if ((pointerState.kind === "node" || pointerState.kind === "center") && !pointerState.moved) {
+      const node = networkGraph.nodes.find((item) => Number(item.member_id) === pointerState.memberId);
+      suppressNetworkNodeClickUntil = Date.now() + 250;
+      if (node) openMember(node);
+    } else if (pointerState.kind === "node" && pointerState.moved) {
+      suppressNetworkNodeClickUntil = Date.now() + 250;
     }
     networkPointerState = null;
+    document.body.classList.remove("is-network-dragging");
     networkCanvas.classList.remove("is-dragging-node", "is-panning");
     if (networkCanvas.hasPointerCapture(event.pointerId)) networkCanvas.releasePointerCapture(event.pointerId);
   });
 
   networkCanvas.addEventListener("pointercancel", () => {
     networkPointerState = null;
+    document.body.classList.remove("is-network-dragging");
     networkCanvas.classList.remove("is-dragging-node", "is-panning");
   });
 }
 
 function renderNetwork(network) {
   const nodes = Array.isArray(network.nodes) ? network.nodes : [];
-  const edges = Array.isArray(network.edges) ? network.edges : [];
+  const aggregates = Array.isArray(network.edges) ? network.edges : [];
   networkCanvas.replaceChildren();
   networkGraph = null;
   hideNetworkTooltip();
   resetNetworkViewport();
+  networkLowRelevanceVisible = false;
   networkEmpty.hidden = nodes.length > 0;
   networkExpandButton.hidden = !(network.has_more_nodes || network.has_more_edges) || networkExpanded;
   networkStatus.textContent = nodes.length
-    ? `显示 ${nodes.length} 个成员、${edges.length} 条聚合关系${network.has_more_nodes || network.has_more_edges ? "；可展开更多" : ""}。`
+    ? `显示 ${nodes.length} 个成员、正在分析关系语义${network.has_more_nodes || network.has_more_edges ? "；可展开更多" : ""}。`
     : "该范围内暂无带明确目标成员的关系事件。";
   if (!nodes.length) return;
 
@@ -745,7 +1009,9 @@ function renderNetwork(network) {
   marker.append(svgElement("path", { d: "M 0 0 L 10 5 L 0 10 z", class: "network-arrow" }));
   defs.append(grid, glow, marker);
   networkCanvas.append(defs);
-  const positions = nodePositions(nodes, network.center_member_id);
+  const pairs = buildRelationshipPairs(aggregates, nodes);
+  const levels = deriveNetworkLevels(nodes, pairs, network.center_member_id);
+  const positions = nodePositions(nodes, network.center_member_id, levels, pairs);
   const background = svgElement("rect", { x: 0, y: 0, width: NETWORK_WIDTH, height: NETWORK_HEIGHT, class: "network-svg-background" });
   const viewport = svgElement("g", { class: "network-viewport" });
   const edgeLayer = svgElement("g", { class: "network-edge-layer" });
@@ -753,46 +1019,56 @@ function renderNetwork(network) {
   viewport.append(edgeLayer, nodeLayer);
   networkCanvas.append(background, viewport);
   networkGraph = {
-    nodes, edges, positions, viewport,
-    nodeElements: new Map(), edgeElements: new Map(),
+    nodes, aggregates, pairs, levels, positions, viewport,
+    centerMemberId: Number(network.center_member_id),
+    nodeElements: new Map(), pairElements: new Map(),
   };
 
-  edges.forEach((edge, index) => {
-    const edgeId = `${edge.source_member_id}:${edge.target_member_id}:${edge.event_type}:${index}`;
-    edge.id = edgeId;
-    const from = positions.get(Number(edge.source_member_id));
-    const to = positions.get(Number(edge.target_member_id));
+  pairs.forEach((pair) => {
+    if (Number(pair.memberA.member_id) !== Number(network.center_member_id)
+      && Number(pair.memberB.member_id) !== Number(network.center_member_id)) {
+      pair.analysis = {
+        ...pendingRelationshipSemantics(),
+        reasons: ["两跳关系默认保守展示；请点击查看已有结构化证据。"],
+      };
+    }
+  });
+
+  pairs.forEach((pair) => {
+    const from = positions.get(Number(pair.memberA.member_id));
+    const to = positions.get(Number(pair.memberB.member_id));
     if (!from || !to) return;
-    const group = svgElement("g", { class: "network-edge", tabindex: 0, role: "button", "data-edge-id": edgeId });
-    const width = Math.min(9, 1.8 + Math.sqrt(Number(edge.count || 1)) * 1.35);
-    const color = relationshipColor(edge.event_type);
+    const group = svgElement("g", { class: `network-edge ${semanticClass(pair.analysis.semantic)}`, tabindex: 0, role: "button", "data-edge-id": pair.id });
+    const width = Math.min(9, 1.8 + Math.sqrt(Number(pair.weight || 1)) * 1.35);
+    const color = semanticColor(pair.analysis.semantic);
     group.append(svgElement("line", {
       x1: from.x, y1: from.y, x2: to.x, y2: to.y,
-      "stroke-width": width, stroke: color, "marker-end": "url(#relation-arrow)",
+      "stroke-width": width, stroke: color,
     }));
     const label = svgElement("text", { x: (from.x + to.x) / 2, y: (from.y + to.y) / 2 - 9, class: "network-edge-label", fill: color });
-    label.textContent = `${eventTypeLabel(edge.event_type)} x${edge.count}`;
+    label.textContent = pair.analysis.label;
     group.append(label);
-    group.addEventListener("click", () => openAggregate(edge));
+    group.addEventListener("click", () => openRelationshipPair(pair));
     group.addEventListener("mouseenter", (event) => {
-      setNetworkFocus(null, edgeId);
-      setNetworkTooltip(edgeTooltip(edge), event);
+      setNetworkFocus(null, pair.id);
+      setNetworkTooltip(pairTooltip(pair), event);
     });
     group.addEventListener("mousemove", positionNetworkTooltip);
     group.addEventListener("mouseleave", () => { clearNetworkFocus(); hideNetworkTooltip(); });
     group.addEventListener("keydown", (event) => {
-      if (event.key === "Enter" || event.key === " ") { event.preventDefault(); openAggregate(edge); }
+      if (event.key === "Enter" || event.key === " ") { event.preventDefault(); openRelationshipPair(pair); }
     });
     edgeLayer.append(group);
-    networkGraph.edgeElements.set(edgeId, group);
+    networkGraph.pairElements.set(pair.id, group);
   });
 
   nodes.forEach((node) => {
     const position = positions.get(Number(node.member_id));
     if (!position) return;
     const isCenter = Number(node.member_id) === Number(network.center_member_id);
+    const level = levels.get(Number(node.member_id)) || 3;
     const group = svgElement("g", {
-      class: `network-node ${Number(node.member_id) === Number(network.center_member_id) ? "center" : ""} ${node.member_status === "mentioned_only" ? "mentioned-only" : ""}`,
+      class: `network-node ${isCenter ? "center" : ""} level-${level} ${node.member_status === "mentioned_only" ? "mentioned-only" : ""}`,
       tabindex: 0, role: "button", "data-member-id": Number(node.member_id),
     });
     if (isCenter) group.append(svgElement("circle", { cx: position.x, cy: position.y, r: 51, class: "network-node-halo" }));
@@ -802,11 +1078,10 @@ function renderNetwork(network) {
     group.append(label);
     group.addEventListener("click", () => {
       if (Date.now() < suppressNetworkNodeClickUntil) return;
-      openMember(node);
     });
     group.addEventListener("mouseenter", (event) => {
       setNetworkFocus(node.member_id);
-      setNetworkTooltip(nodeTooltip(node, edges), event);
+      setNetworkTooltip(nodeTooltip(node), event);
     });
     group.addEventListener("mousemove", positionNetworkTooltip);
     group.addEventListener("mouseleave", () => { clearNetworkFocus(); hideNetworkTooltip(); });
@@ -816,6 +1091,162 @@ function renderNetwork(network) {
     nodeLayer.append(group);
     networkGraph.nodeElements.set(Number(node.member_id), group);
   });
+  applyNetworkVisibility();
+  analyzeRelationshipPairs(networkGraph);
+}
+
+function updatePairPresentation(pair) {
+  if (!networkGraph) return;
+  const element = networkGraph.pairElements.get(pair.id);
+  if (!element) return;
+  element.className.baseVal = `network-edge ${semanticClass(pair.analysis.semantic)}`;
+  const color = semanticColor(pair.analysis.semantic);
+  const line = element.querySelector("line");
+  const label = element.querySelector("text");
+  line.setAttribute("stroke", color);
+  label.setAttribute("fill", color);
+  label.textContent = pair.analysis.label;
+}
+
+function relationshipSummaryFields(pair) {
+  const analysis = pair.analysis || pendingRelationshipSemantics();
+  return [
+    ["关系", `${memberDisplayName(pair.memberA)} ↔ ${memberDisplayName(pair.memberB)}`],
+    ["当前判断", analysis.label],
+    ["双向互动", analysis.is_bidirectional ? "是" : "否"],
+    ["近 90 天证据", `${analysis.evidence_count || 0} 条（${analysis.directional_counts?.aToB || 0}/${analysis.directional_counts?.bToA || 0}）`],
+    ["最近互动", formatTimestamp(analysis.recent_timestamp)],
+    ["关键理由", (analysis.reasons || ["正在读取近 90 天结构化证据。"]).join("\n")],
+    ["转述辅助", analysis.reported_count ? `${analysis.reported_count} 条，仅作参考` : "暂无"],
+  ];
+}
+
+function renderPairSummary(pair) {
+  relationshipSummary.replaceChildren();
+  relationshipSummaryFields(pair).forEach(([label, value]) => {
+    const item = document.createElement("div");
+    const term = document.createElement("dt");
+    const detail = document.createElement("dd");
+    term.textContent = label;
+    detail.textContent = value;
+    item.append(term, detail);
+    relationshipSummary.append(item);
+  });
+}
+
+function renderPairEvidenceLinks(pair) {
+  relationshipEvidenceList.replaceChildren();
+  const heading = recordRow({
+    title: "按方向查看原始证据",
+    meta: "选择一项聚合后，将继续使用现有证据分页接口。",
+  });
+  relationshipEvidenceList.append(heading);
+  pair.aggregates.forEach((aggregate) => {
+    const row = recordRow({
+      title: `${eventTypeLabel(aggregate.event_type)} · ${aggregateLabel(aggregate)}`,
+      meta: `来源：${sourceCountsLabel(aggregate.source_counts)}；最近：${formatTimestamp(aggregate.last_time)}；x${aggregate.count}`,
+    });
+    row.classList.add("interactive-record");
+    row.tabIndex = 0;
+    row.addEventListener("click", () => openAggregate(aggregate));
+    row.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        openAggregate(aggregate);
+      }
+    });
+    relationshipEvidenceList.append(row);
+  });
+  relationshipMoreButton.hidden = true;
+}
+
+function openRelationshipPair(pair) {
+  activeAggregate = null;
+  activeAggregateIdentity = networkCenter || selectedMember;
+  evidenceCursor = null;
+  relationshipSummary.dataset.pairId = pair.id;
+  renderPairSummary(pair);
+  renderPairEvidenceLinks(pair);
+  if (!relationshipDialog.open) relationshipDialog.showModal();
+}
+
+async function mapConcurrent(items, limit, operation) {
+  if (!items.length) return [];
+  const results = new Array(items.length);
+  let cursor = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (cursor < items.length) {
+      const index = cursor;
+      cursor += 1;
+      results[index] = await operation(items[index]);
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
+
+async function loadAggregateWindowEvents(aggregate, identity, cutoffTimestamp) {
+  const events = [];
+  let cursor = null;
+  let completed = false;
+  while (!completed) {
+    const parameters = {
+      platform_id: identity.platform_id,
+      group_id: identity.group_id,
+      source_member_id: aggregate.source_member_id,
+      event_type: aggregate.event_type,
+    };
+    if (aggregate.target_member_id !== null && aggregate.target_member_id !== undefined) {
+      parameters.target_member_id = aggregate.target_member_id;
+    }
+    if (cursor) {
+      parameters.before_timestamp = cursor.before_timestamp;
+      parameters.before_id = cursor.before_id;
+    }
+    const result = await bridge.apiGet("relationship-aggregate-events", parameters);
+    const page = Array.isArray(result.events) ? result.events : [];
+    events.push(...page.filter((event) => Number(event.event_timestamp || 0) >= cutoffTimestamp));
+    const oldestTimestamp = page.length
+      ? Math.min(...page.map((event) => Number(event.event_timestamp || 0))) : 0;
+    cursor = result.next_cursor || null;
+    completed = !cursor || !page.length || oldestTimestamp < cutoffTimestamp;
+  }
+  return { ...aggregate, events };
+}
+
+async function analyzeRelationshipPairs(graph) {
+  const identity = networkCenter;
+  if (!identity || graph !== networkGraph) return;
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  const cutoffTimestamp = nowSeconds - RELATIONSHIP_WINDOW_SECONDS;
+  try {
+    const centerPairs = graph.pairs.filter((pair) => pairIncludesMember(pair, graph.centerMemberId));
+    await mapConcurrent(centerPairs, 1, async (pair) => {
+      const directionalEvents = await mapConcurrent(pair.aggregates, 3,
+        (aggregate) => loadAggregateWindowEvents(aggregate, identity, cutoffTimestamp));
+      if (graph !== networkGraph) return;
+      pair.analysis = deriveRelationshipSemantics({
+        memberA: pair.memberA,
+        memberB: pair.memberB,
+        directionalEvents,
+        nowSeconds,
+      });
+      updatePairPresentation(pair);
+      if (!relationshipDialog.open) return;
+      const visiblePair = relationshipSummary.dataset.pairId;
+      if (visiblePair === pair.id) {
+        renderPairSummary(pair);
+        renderPairEvidenceLinks(pair);
+      }
+    });
+    if (graph === networkGraph) {
+      networkStatus.textContent = `显示 ${graph.nodes.length} 个成员、${graph.pairs.length} 条成员对关系；中心成员的一跳关系已完成近 90 天语义分析。`;
+    }
+  } catch (error) {
+    if (graph === networkGraph) {
+      networkStatus.textContent = `关系网已显示，但部分语义分析失败：${error.message || "请稍后刷新"}`;
+    }
+  }
 }
 
 function renderAggregateSummary(aggregate) {
@@ -879,6 +1310,7 @@ async function openAggregate(aggregate) {
   activeAggregate = aggregate;
   activeAggregateIdentity = networkCenter || selectedMember;
   evidenceCursor = null;
+  delete relationshipSummary.dataset.pairId;
   renderAggregateSummary(aggregate);
   if (!relationshipDialog.open) relationshipDialog.showModal();
   await loadAggregateEvidence();
@@ -1076,7 +1508,11 @@ networkExpandButton.addEventListener("click", () => {
   networkExpanded = true;
   loadNetwork();
 });
-networkResetViewButton.addEventListener("click", resetNetworkViewport);
+networkLowRelevanceButton.addEventListener("click", () => {
+  networkLowRelevanceVisible = !networkLowRelevanceVisible;
+  applyNetworkVisibility();
+});
+networkResetViewButton.addEventListener("click", resetNetworkView);
 networkScopeInput.addEventListener("change", () => { networkExpanded = false; loadNetwork(); });
 networkTypeInput.addEventListener("change", () => { networkExpanded = false; loadNetwork(); });
 networkSourceInput.addEventListener("change", () => { networkExpanded = false; loadNetwork(); });
