@@ -6,6 +6,7 @@ import unittest
 
 from active_reply import (
     GroupReplyActivity,
+    active_reply_gate_reason,
     decide_active_reply,
     normalize_active_reply_settings,
 )
@@ -113,6 +114,36 @@ class ActiveReplyPolicyTests(unittest.TestCase):
         self.assertEqual(settings["member_overrides"], {
             "7": {"reply_rate_multiplier": 3.0, "anti_spam_sensitivity": 0.5}
         })
+
+    def test_send_gate_rejects_expired_stale_and_recent_tasks(self) -> None:
+        common = {
+            "now": 120.0,
+            "task_created_at": 100.0,
+            "task_generation": 2,
+            "current_generation": 2,
+            "task_revision": 4,
+            "current_revision": 4,
+            "last_reply_at": 0.0,
+            "task_timeout_seconds": 20.0,
+            "output_gap_seconds": 8.0,
+        }
+        self.assertIsNone(active_reply_gate_reason(**common))
+        self.assertEqual(
+            active_reply_gate_reason(**{**common, "now": 121.0, "task_created_at": 100.0}),
+            "任务已过期",
+        )
+        self.assertEqual(
+            active_reply_gate_reason(**{**common, "current_generation": 3}),
+            "任务代次已变化",
+        )
+        self.assertEqual(
+            active_reply_gate_reason(**{**common, "current_revision": 5}),
+            "上下文已有新消息",
+        )
+        self.assertEqual(
+            active_reply_gate_reason(**{**common, "last_reply_at": 116.0}),
+            "发送间隔保护中",
+        )
 
 
 if __name__ == "__main__":

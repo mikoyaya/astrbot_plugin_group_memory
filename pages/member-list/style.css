@@ -200,6 +200,16 @@ textarea:focus, .tag-editor input:focus { border-color: var(--accent); }
 .member-rule-grid input { min-width: 0; height: 34px; padding: 0 8px; border: 1px solid var(--border); border-radius: 5px; outline: none; background: var(--surface); color: var(--text); }
 .member-rule-grid input:focus { border-color: var(--accent); }
 .settings-actions { display: flex; justify-content: flex-end; margin-top: 14px; }
+.debug-controls { display: flex; align-items: end; gap: 12px; }
+.debug-controls .network-control { min-width: 128px; }
+.debug-controls select { height: 30px; padding: 0 7px; border: 1px solid var(--border); border-radius: 5px; background: var(--surface); color: var(--text); }
+.debug-entry { border: 1px solid var(--border); border-radius: 5px; background: var(--surface-muted); }
+.debug-entry summary { display: flex; align-items: center; gap: 8px; min-height: 34px; padding: 7px 10px; cursor: pointer; color: var(--text); font-size: 12px; list-style-position: inside; }
+.debug-entry summary::marker { color: var(--muted); }
+.debug-entry-reason { overflow: hidden; color: var(--muted); text-overflow: ellipsis; white-space: nowrap; }
+.debug-entry-detail { padding: 7px 28px 9px; border-top: 1px solid var(--border); color: var(--muted); font-size: 12px; line-height: 1.45; overflow-wrap: anywhere; }
+.debug-entry-replied { border-color: color-mix(in srgb, #14866d 45%, var(--border)); }
+.debug-entry-blocked, .debug-entry-expired, .debug-entry-error { border-color: color-mix(in srgb, #b42318 40%, var(--border)); }
 .network-toolbar {
   display: flex;
   flex-wrap: wrap;
@@ -427,4 +437,5 @@ body.is-network-dragging, body.is-network-dragging * { user-select: none !import
   .settings-header .secondary-button { width: 100%; }
   .settings-grid, .member-rule-grid { grid-template-columns: 1fr; }
   .settings-actions .command-button { width: 100%; }
+  .debug-controls { align-items: stretch; flex-direction: column; }
 }

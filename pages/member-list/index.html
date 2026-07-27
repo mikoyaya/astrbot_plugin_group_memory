@@ -152,7 +152,7 @@
             <div id="active-reply-member-rule-list" class="record-list"></div>
           </section>
           <section class="settings-card settings-card-wide">
-            <div class="section-heading"><h3>调试信息</h3><label class="toggle-row compact-toggle"><input id="active-reply-debug-input" type="checkbox" /><span>记录最近判定</span></label></div>
+            <div class="section-heading"><h3>调试信息</h3><div class="debug-controls"><label class="network-control"><span>筛选</span><select id="active-reply-debug-filter" aria-label="主动回复调试筛选"><option value="all">全部</option><option value="replied">已回复</option><option value="not_replied">未回复</option><option value="blocked">被拦截</option><option value="exception">异常/过期</option></select></label><label class="toggle-row compact-toggle"><input id="active-reply-debug-input" type="checkbox" /><span>记录最近判定</span></label></div></div>
             <p class="field-help">仅保存在内存中，最多 50 条、保留 1 小时；不保存聊天正文。</p>
             <div id="active-reply-debug-list" class="record-list"></div>
           </section>

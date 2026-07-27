@@ -91,6 +91,7 @@ const activeReplyMemberSensitivityInput = document.getElementById("active-reply-
 const activeReplyMemberSaveButton = document.getElementById("active-reply-member-save-button");
 const activeReplyMemberRuleList = document.getElementById("active-reply-member-rule-list");
 const activeReplyDebugInput = document.getElementById("active-reply-debug-input");
+const activeReplyDebugFilter = document.getElementById("active-reply-debug-filter");
 const activeReplyDebugList = document.getElementById("active-reply-debug-list");
 const activeReplySaveButton = document.getElementById("active-reply-save-button");
 const relationshipDialog = document.getElementById("relationship-dialog");
@@ -1797,18 +1798,49 @@ function renderActiveReplyMemberRules() {
 function renderActiveReplyDebug() {
   activeReplyDebugList.replaceChildren();
   const entries = Array.isArray(activeReplyDebug?.entries) ? activeReplyDebug.entries : [];
-  if (!entries.length) {
+  const filter = activeReplyDebugFilter.value || "all";
+  const filteredEntries = entries.filter((entry) => {
+    if (filter === "all") return true;
+    if (filter === "exception") return ["dropped", "expired", "error"].includes(entry.status);
+    return entry.status === filter;
+  });
+  if (!filteredEntries.length) {
     activeReplyDebugList.append(recordRow({ title: "暂无调试记录", meta: "启用记录后，新的群消息会在这里显示是否触发及其原因。" }));
     return;
   }
-  entries.forEach((entry) => {
+  const statusLabels = {
+    pending: "生成中",
+    replied: "已回复",
+    not_replied: "未回复",
+    blocked: "被拦截",
+    dropped: "已丢弃",
+    expired: "已过期",
+    error: "异常",
+  };
+  filteredEntries.forEach((entry) => {
     const protection = Array.isArray(entry.protection_reasons) && entry.protection_reasons.length
       ? `保护：${entry.protection_reasons.join("、")}` : "保护：未触发";
-    const flags = [entry.blacklisted ? "黑名单" : "", entry.prioritized ? "优先响应" : "", entry.bot_message ? "机器人消息" : ""].filter(Boolean).join(" · ");
-    activeReplyDebugList.append(recordRow({
-      title: `${entry.triggered ? "已触发" : "未触发"} · ${entry.reason || "未知原因"}`,
-      meta: `${formatTimestamp(entry.timestamp)} · 当前回复率 ${Math.round(Number(entry.effective_reply_rate || 0) * 100)}% · ${protection}${flags ? ` · ${flags}` : ""}`,
-    }));
+    const flags = [entry.blacklisted ? "黑名单" : "", entry.prioritized ? "优先响应" : "", entry.bot_message ? "机器人消息" : "", entry.duplicate ? "重复消息" : "", entry.model_switch_dropped ? "模型切换丢弃" : ""].filter(Boolean).join(" · ");
+    const row = document.createElement("details");
+    row.className = `debug-entry debug-entry-${entry.status || "unknown"}`;
+    const summaryRow = document.createElement("summary");
+    summaryRow.textContent = `${statusLabels[entry.status] || "未知状态"} · ${formatTimestamp(entry.timestamp)} · 群 ${entry.group_id || "-"} · 用户 ${entry.user_id || "-"}`;
+    const reason = document.createElement("span");
+    reason.className = "debug-entry-reason";
+    reason.textContent = entry.reason || "未知原因";
+    summaryRow.append(reason);
+    const detail = document.createElement("div");
+    detail.className = "debug-entry-detail";
+    detail.textContent = [
+      `回复率 ${Math.round(Number(entry.effective_reply_rate || 0) * 100)}%`,
+      protection,
+      `任务年龄 ${Number(entry.task_age_seconds || 0).toFixed(1)} 秒`,
+      flags,
+      entry.output_gate ? `发送闸门：${entry.output_gate}` : "",
+      entry.message_id ? `消息 ID：${entry.message_id}` : "",
+    ].filter(Boolean).join(" · ");
+    row.append(summaryRow, detail);
+    activeReplyDebugList.append(row);
   });
 }
 
@@ -1949,6 +1981,7 @@ activeReplyRefreshButton.addEventListener("click", loadActiveReplySettings);
 activeReplyGroupInput.addEventListener("change", loadActiveReplySettings);
 activeReplyMemberSaveButton.addEventListener("click", saveActiveReplyMemberRule);
 activeReplySaveButton.addEventListener("click", saveActiveReplySettings);
+activeReplyDebugFilter.addEventListener("change", renderActiveReplyDebug);
 function reloadNetworkForNewContext() {
   networkExpanded = false;
   networkLayoutSnapshot = null;

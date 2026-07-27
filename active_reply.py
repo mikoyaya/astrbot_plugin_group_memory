@@ -137,6 +137,8 @@ class SenderActivity:
 class GroupReplyActivity:
     senders: dict[str, SenderActivity] = field(default_factory=dict)
     last_bot_reply_at: int = 0
+    last_active_reply_at: float = 0.0
+    revision: int = 0
 
 
 @dataclass(frozen=True)
@@ -148,6 +150,30 @@ class ActiveReplyDecision:
     is_blacklisted: bool
     is_prioritized: bool
     member_id: int | None
+
+
+def active_reply_gate_reason(
+    *,
+    now: float,
+    task_created_at: float,
+    task_generation: int,
+    current_generation: int,
+    task_revision: int,
+    current_revision: int,
+    last_reply_at: float,
+    task_timeout_seconds: float,
+    output_gap_seconds: float,
+) -> str | None:
+    """Return a conservative send-gate reason, or ``None`` when allowed."""
+    if now - task_created_at > task_timeout_seconds:
+        return "任务已过期"
+    if task_generation != current_generation:
+        return "任务代次已变化"
+    if task_revision != current_revision:
+        return "上下文已有新消息"
+    if last_reply_at and now - last_reply_at < output_gap_seconds:
+        return "发送间隔保护中"
+    return None
 
 
 def _fingerprint(content: str) -> str:
